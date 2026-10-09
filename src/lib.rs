@@ -48,14 +48,16 @@ pub struct Gpu {
 }
 
 impl Gpu {
+    /// The largest class the card holds: a 10 GB card is "<=8", a 20 GB one "16". Drivers report a little under
+    /// the label (a 12 GB card as 11.99 GiB), hence the half gigabyte of slack.
     pub fn vram_bucket(bytes: u64) -> String {
         let gb = bytes as f64 / 1_073_741_824.0;
         match gb {
             g if g <= 0.0 => "?",
-            g if g <= 9.0 => "<=8",
-            g if g <= 13.0 => "12",
-            g if g <= 20.0 => "16",
-            _ => "24+",
+            g if g >= 23.5 => "24+",
+            g if g >= 15.5 => "16",
+            g if g >= 11.5 => "12",
+            _ => "<=8",
         }
         .to_string()
     }
@@ -189,8 +191,12 @@ impl Hub {
         !self.inner.disabled_by_env && state.acknowledged && state.telemetry.unwrap_or(true)
     }
 
+    /// The window language as the hub takes it, two ASCII letters; anything else keeps the previous one.
     pub fn set_ui_lang(&self, lang: &str) {
-        *self.inner.ui_lang.lock().unwrap_or_else(|p| p.into_inner()) = lang.chars().take(2).collect::<String>().to_ascii_lowercase();
+        let code = lang.get(..2).filter(|code| code.bytes().all(|b| b.is_ascii_alphabetic()));
+        if let Some(code) = code {
+            *self.inner.ui_lang.lock().unwrap_or_else(|p| p.into_inner()) = code.to_ascii_lowercase();
+        }
     }
 
     fn ui_lang(&self) -> String {
@@ -372,7 +378,11 @@ impl Hub {
                 Ok(Ok(fresh)) => {
                     self.change(|s| {
                         match fresh {
-                            Some((tag, feed)) => s.feed = Some(CachedFeed { etag: tag, feed, source: url.clone(), fetched_at: now_secs() }),
+                            Some((tag, feed)) => {
+                                // what the user did with a notice that left the feed is no longer needed
+                                s.seen.retain(|id, _| feed.items.iter().any(|item| item.id == *id));
+                                s.feed = Some(CachedFeed { etag: tag, feed, source: url.clone(), fetched_at: now_secs() });
+                            }
                             None => {
                                 if let Some(f) = &mut s.feed {
                                     f.fetched_at = now_secs();
@@ -428,23 +438,25 @@ impl Hub {
         };
         for day in days {
             let Some(report) = self.report_for(&day) else { continue };
-            let mut sent = false;
+            // settled: the hub took the report, or refused it for good (sending it again changes nothing)
+            let mut settled = false;
             for url in self.ordered_urls() {
                 let request = self.inner.config.http.post(format!("{url}/v1/report")).timeout(REQUEST_TIMEOUT).json(&report);
                 match request.send().await {
                     Ok(r) if r.status().is_success() => {
-                        sent = true;
+                        settled = true;
                         break;
                     }
                     Ok(r) if r.status().is_client_error() && r.status() != reqwest::StatusCode::TOO_MANY_REQUESTS => {
                         tracing::warn!("studio hub: the report of {day} was refused ({}): {}", r.status(), r.text().await.unwrap_or_default());
+                        settled = true;
                         break;
                     }
                     Ok(r) => tracing::warn!("studio hub: {url} answered {} to the report", r.status()),
                     Err(e) => tracing::warn!("studio hub: {url}: the report did not leave: {e}"),
                 }
             }
-            if sent {
+            if settled {
                 self.change(|s| {
                     if let Some(d) = s.days.get_mut(&day) {
                         d.dirty = false;

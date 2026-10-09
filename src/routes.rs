@@ -29,7 +29,7 @@ struct WindowLang {
 /// each with what the user already did with it. The window draws them in its own style and passes its language
 /// as `?lang=`, which also goes into the report.
 async fn state(State(hub): State<Hub>, Query(window): Query<WindowLang>) -> Json<serde_json::Value> {
-    if let Some(lang) = window.lang.as_deref().filter(|l| l.len() >= 2 && l.is_char_boundary(2)) {
+    if let Some(lang) = window.lang.as_deref() {
         hub.set_ui_lang(lang);
     }
     let mut out = hub.status();

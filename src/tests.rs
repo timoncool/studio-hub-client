@@ -178,3 +178,24 @@ async fn the_state_survives_a_restart() {
     assert!(second.telemetry_on());
     assert_eq!(second.lock().sessions, 2, "each start is a launch");
 }
+
+#[test]
+fn a_card_reports_the_largest_class_it_holds() {
+    let gib = |g: f64| (g * 1_073_741_824.0) as u64;
+    assert_eq!(Gpu::vram_bucket(gib(11.99)), "12");
+    assert_eq!(Gpu::vram_bucket(gib(10.0)), "<=8");
+    assert_eq!(Gpu::vram_bucket(gib(20.0)), "16");
+    assert_eq!(Gpu::vram_bucket(gib(23.99)), "24+");
+    assert_eq!(Gpu::vram_bucket(0), "?");
+}
+
+#[tokio::test]
+async fn only_two_ascii_letters_become_the_report_language() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = make_hub(dir.path(), vec![dead().await]);
+    hub.set_ui_lang("pt-BR");
+    assert_eq!(hub.ui_lang(), "pt");
+    hub.set_ui_lang("ру");
+    hub.set_ui_lang("x");
+    assert_eq!(hub.ui_lang(), "pt");
+}
