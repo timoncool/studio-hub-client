@@ -50,6 +50,66 @@ pub struct Content {
     pub buttons: Vec<Button>,
 }
 
+/// When and how often the notice is shown (studio-hub/src/shared/types.ts `Rules`, evaluated as in its rules.ts).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct Rules {
+    pub delay_s: u32,
+    pub after_sessions: u32,
+    pub views: Option<Vec<String>>,
+    /// once | session | interval
+    pub frequency: String,
+    pub interval_h: u32,
+    pub max_shows: Option<u32>,
+    /// never | snooze
+    pub after_dismiss: String,
+    pub snooze_h: u32,
+    /// all | new | returning
+    pub audience: String,
+    pub new_days: u32,
+}
+
+/// What a client remembers about one notice. Unix seconds.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct NoticeMemory {
+    pub shows: u32,
+    pub last_shown: Option<i64>,
+    /// The launch of the last impression: a notice shown in this launch stays until closed.
+    pub shown_session: Option<u32>,
+    pub clicked_at: Option<i64>,
+    pub dismissed_at: Option<i64>,
+}
+
+/// Whether the rules let the notice show in this launch; delay and views apply when the window draws it.
+pub fn eligible(rules: &Rules, seen: &NoticeMemory, sessions: u32, first_seen: i64, now: i64) -> bool {
+    const HOUR: i64 = 3600;
+    if sessions < rules.after_sessions {
+        return false;
+    }
+    let age = now - first_seen;
+    let border = rules.new_days as i64 * 24 * HOUR;
+    if (rules.audience == "new" && age > border) || (rules.audience == "returning" && age <= border) {
+        return false;
+    }
+    if let Some(closed) = seen.dismissed_at {
+        if rules.after_dismiss != "snooze" || now - closed < rules.snooze_h as i64 * HOUR {
+            return false;
+        }
+    }
+    if seen.shown_session == Some(sessions) {
+        return true;
+    }
+    if rules.max_shows.is_some_and(|max| seen.shows >= max) {
+        return false;
+    }
+    if rules.frequency == "once" && seen.shows > 0 {
+        return false;
+    }
+    if rules.frequency == "interval" && seen.last_shown.is_some_and(|at| now - at < rules.interval_h as i64 * HOUR) {
+        return false;
+    }
+    true
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct FeedItem {
     pub id: String,
@@ -66,8 +126,7 @@ pub struct FeedItem {
     /// sunset | orchid | lime | graphite, or null: the colour follows the place in the bar stack.
     pub theme: Option<String>,
     pub dismissible: bool,
-    /// once | until_dismissed
-    pub show: String,
+    pub rules: Rules,
     pub image: Option<String>,
     pub date: Option<String>,
     #[serde(default)]
@@ -136,7 +195,9 @@ mod tests {
     fn item(extra: serde_json::Value) -> FeedItem {
         let mut base = serde_json::json!({
             "id": "n", "kind": "bar", "priority": 0, "from": null, "until": null, "versions": null, "os": null, "langs": null,
-            "test": false, "ad": null, "theme": null, "dismissible": true, "show": "until_dismissed", "image": null, "date": null,
+            "test": false, "ad": null, "theme": null, "dismissible": true, "image": null, "date": null,
+            "rules": {"delay_s": 0, "after_sessions": 1, "views": null, "frequency": "session", "interval_h": 24, "max_shows": null,
+                      "after_dismiss": "never", "snooze_h": 72, "audience": "all", "new_days": 7},
             "tags": [], "content": {"en": {"title": "", "body": "Hello", "buttons": []}}
         });
         for (k, v) in extra.as_object().unwrap() {
@@ -162,6 +223,37 @@ mod tests {
         assert!(!fits(&item(serde_json::json!({"versions": {"min": "3.6.0", "max": null}})), &who()));
         assert!(!fits(&item(serde_json::json!({"versions": {"min": null, "max": "3.4.9"}})), &who()));
         assert!(fits(&item(serde_json::json!({"versions": {"min": "3.5.0", "max": "3.10.0"}})), &who()));
+    }
+
+    #[test]
+    fn the_rules_match_the_hubs_evaluator() {
+        let h = 3600;
+        let now = 1_000 * h;
+        let mut rules = item(serde_json::json!({})).rules;
+        let old = now - 30 * 24 * h;
+        rules.frequency = "once".into();
+        assert!(eligible(&rules, &NoticeMemory::default(), 3, old, now));
+        let shown = NoticeMemory { shows: 1, last_shown: Some(now - h), shown_session: Some(2), ..Default::default() };
+        assert!(!eligible(&rules, &shown, 3, old, now), "once ever");
+        assert!(eligible(&rules, &NoticeMemory { shown_session: Some(3), ..shown.clone() }, 3, old, now), "stays this launch");
+        rules.frequency = "interval".into();
+        assert!(!eligible(&rules, &shown, 3, old, now), "not within a day");
+        assert!(eligible(&rules, &NoticeMemory { last_shown: Some(now - 25 * h), ..shown.clone() }, 3, old, now));
+        rules.frequency = "session".into();
+        rules.max_shows = Some(1);
+        assert!(!eligible(&rules, &shown, 3, old, now), "the cap");
+        rules.max_shows = None;
+        let closed = NoticeMemory { dismissed_at: Some(now - 10 * h), ..shown.clone() };
+        assert!(!eligible(&rules, &closed, 3, old, now));
+        rules.after_dismiss = "snooze".into();
+        assert!(!eligible(&rules, &closed, 3, old, now), "snoozed for 72 h");
+        assert!(eligible(&rules, &NoticeMemory { dismissed_at: Some(now - 80 * h), ..shown.clone() }, 3, old, now));
+        rules.after_sessions = 5;
+        assert!(!eligible(&rules, &NoticeMemory::default(), 3, old, now));
+        rules.after_sessions = 1;
+        rules.audience = "new".into();
+        assert!(!eligible(&rules, &NoticeMemory::default(), 3, old, now));
+        assert!(eligible(&rules, &NoticeMemory::default(), 1, now - 2 * 24 * h, now));
     }
 
     #[test]

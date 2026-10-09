@@ -6,7 +6,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::feed::Feed;
+use crate::feed::{Feed, NoticeMemory};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct CachedFeed {
@@ -18,12 +18,6 @@ pub struct CachedFeed {
     pub fetched_at: i64,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
-pub struct Seen {
-    pub shown_at: Option<i64>,
-    pub clicked_at: Option<i64>,
-    pub dismissed_at: Option<i64>,
-}
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct NoticeCounts {
@@ -51,7 +45,16 @@ pub struct State {
     pub feed: Option<CachedFeed>,
     pub last_source: Option<String>,
     pub last_error: Option<String>,
-    pub seen: BTreeMap<String, Seen>,
+    /// Launches so far, counted when the studio starts.
+    #[serde(default)]
+    pub sessions: u32,
+    /// Unix seconds of the first launch with the hub client (for new or returning installs).
+    #[serde(default)]
+    pub first_seen: i64,
+    /// The last popup, for the global cap of one a day across all popups.
+    #[serde(default)]
+    pub last_popup_at: Option<i64>,
+    pub seen: BTreeMap<String, NoticeMemory>,
     pub days: BTreeMap<String, Day>,
 }
 

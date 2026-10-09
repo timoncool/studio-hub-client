@@ -21,7 +21,8 @@ use chrono::Utc;
 use serde::Serialize;
 
 pub use feed::{Audience, Content, Feed, FeedItem};
-use state::{CachedFeed, Seen, State};
+pub use feed::{NoticeMemory, Rules};
+use state::{CachedFeed, State};
 
 /// The hub's own address and the RU proxy in front of it.
 pub const DIRECT_URL: &str = "https://studio-hub.timoncool.workers.dev";
@@ -32,6 +33,8 @@ const REPORT_FIRST: Duration = Duration::from_secs(60);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const REPORT_DAYS: i64 = 14;
+/// The global cap across all popups: one a day, besides one per launch.
+const POPUP_GAP: i64 = 24 * 3600;
 
 /// The card as the studio describes it; values are bucketed so no machine can be told apart by them.
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -151,6 +154,10 @@ impl Hub {
             state.install = None;
             state.days.clear();
         }
+        state.sessions += 1;
+        if state.first_seen == 0 {
+            state.first_seen = now_secs();
+        }
         let ui_lang = Mutex::new(config.ui_lang.clone());
         let hub = Hub {
             inner: Arc::new(Inner { config, urls, test: env_on("STUDIO_HUB_TEST"), disabled_by_env, path, state: Mutex::new(state), ui_lang }),
@@ -267,10 +274,20 @@ impl Hub {
         let counting = self.telemetry_on();
         self.change(|s| {
             let at = now_secs();
-            let seen = s.seen.entry(id.to_string()).or_insert_with(Seen::default);
+            let session = s.sessions;
+            let popup = s.feed.as_ref().is_some_and(|f| f.feed.items.iter().any(|i| i.id == id && i.kind == "popup"));
+            let seen = s.seen.entry(id.to_string()).or_default();
             match event {
                 NoticeEvent::Shown => {
-                    seen.shown_at.get_or_insert(at);
+                    if seen.shown_session == Some(session) {
+                        return;
+                    }
+                    seen.shows += 1;
+                    seen.last_shown = Some(at);
+                    seen.shown_session = Some(session);
+                    if popup {
+                        s.last_popup_at = Some(at);
+                    }
                 }
                 NoticeEvent::Clicked => seen.clicked_at = Some(at),
                 NoticeEvent::Dismissed => seen.dismissed_at = Some(at),
@@ -290,19 +307,27 @@ impl Hub {
         });
     }
 
-    /// The notices this studio should consider now, newest feed first, with what the user already did with them.
-    pub fn items(&self) -> Vec<(FeedItem, Seen)> {
+    /// The notices that fit this studio, by priority, each with what the user did with it and whether its rules let
+    /// it show in this launch (delay and views are left to the window).
+    pub fn items(&self) -> Vec<(FeedItem, NoticeMemory, bool)> {
         let state = self.lock();
         let Some(cached) = &state.feed else { return Vec::new() };
         let now = Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
         let lang = self.ui_lang();
         let who = Audience { version: &self.inner.config.version, platform: platform(), lang: &lang, test: self.inner.test, now: &now };
-        let mut items: Vec<(FeedItem, Seen)> = cached
+        let at = now_secs();
+        let popup_room = state.last_popup_at.is_none_or(|last| at - last >= POPUP_GAP);
+        let mut items: Vec<(FeedItem, NoticeMemory, bool)> = cached
             .feed
             .items
             .iter()
             .filter(|item| feed::fits(item, &who))
-            .map(|item| (item.clone(), state.seen.get(&item.id).cloned().unwrap_or_default()))
+            .map(|item| {
+                let seen = state.seen.get(&item.id).cloned().unwrap_or_default();
+                let ok = feed::eligible(&item.rules, &seen, state.sessions, state.first_seen, at)
+                    && (item.kind != "popup" || popup_room || seen.shown_session == Some(state.sessions));
+                (item.clone(), seen, ok)
+            })
             .collect();
         items.sort_by(|a, b| b.0.priority.cmp(&a.0.priority));
         items
@@ -470,6 +495,7 @@ impl Hub {
             "fetchedAt": state.feed.as_ref().map(|f| f.fetched_at),
             "lastError": state.last_error,
             "test": self.inner.test,
+            "session": state.sessions,
         })
     }
 }

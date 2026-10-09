@@ -17,13 +17,13 @@ const ETAG: &str = "\"abc\"";
 fn feed() -> serde_json::Value {
     serde_json::json!({"schema": 1, "app": "yue2", "generated": "2026-10-09T00:00:00.000Z", "items": [
         {"id": "low", "kind": "bar", "priority": 1, "from": null, "until": null, "versions": null, "os": null, "langs": null, "test": false,
-         "ad": null, "theme": null, "dismissible": true, "show": "until_dismissed", "image": null, "date": null, "tags": [],
+         "ad": null, "theme": null, "dismissible": true, "rules": {"delay_s": 0, "after_sessions": 1, "views": null, "frequency": "session", "interval_h": 24, "max_shows": null, "after_dismiss": "never", "snooze_h": 72, "audience": "all", "new_days": 7}, "image": null, "date": null, "tags": [],
          "content": {"en": {"title": "", "body": "Low", "buttons": []}}},
         {"id": "high", "kind": "bar", "priority": 9, "from": null, "until": null, "versions": null, "os": null, "langs": null, "test": false,
-         "ad": null, "theme": "lime", "dismissible": true, "show": "until_dismissed", "image": null, "date": null, "tags": [],
+         "ad": null, "theme": "lime", "dismissible": true, "rules": {"delay_s": 0, "after_sessions": 1, "views": null, "frequency": "session", "interval_h": 24, "max_shows": null, "after_dismiss": "never", "snooze_h": 72, "audience": "all", "new_days": 7}, "image": null, "date": null, "tags": [],
          "content": {"en": {"title": "", "body": "High", "buttons": []}}},
         {"id": "test-only", "kind": "popup", "priority": 5, "from": null, "until": null, "versions": null, "os": null, "langs": null, "test": true,
-         "ad": null, "theme": null, "dismissible": true, "show": "once", "image": null, "date": null, "tags": [],
+         "ad": null, "theme": null, "dismissible": true, "rules": {"delay_s": 20, "after_sessions": 1, "views": null, "frequency": "once", "interval_h": 24, "max_shows": null, "after_dismiss": "never", "snooze_h": 72, "audience": "all", "new_days": 7}, "image": null, "date": null, "tags": [],
          "content": {"en": {"title": "T", "body": "", "buttons": []}}}
     ]})
 }
@@ -94,7 +94,7 @@ async fn the_feed_comes_through_the_cascade_and_revalidates_with_its_etag() {
     let live = serve(mock.clone()).await;
     let hub = make_hub(dir.path(), vec![dead().await, live.clone()]);
     hub.refresh().await.unwrap();
-    let ids: Vec<String> = hub.items().into_iter().map(|(i, _)| i.id).collect();
+    let ids: Vec<String> = hub.items().into_iter().map(|(i, _, _)| i.id).collect();
     assert_eq!(ids, ["high", "low"], "priority order, the test notice left out");
     assert_eq!(hub.lock().last_source.as_deref(), Some(live.as_str()));
 
@@ -176,4 +176,5 @@ async fn the_state_survives_a_restart() {
     assert_eq!(second.lock().install, id);
     assert!(second.lock().seen.contains_key("high"));
     assert!(second.telemetry_on());
+    assert_eq!(second.lock().sessions, 2, "each start is a launch");
 }

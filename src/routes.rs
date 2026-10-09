@@ -36,9 +36,10 @@ async fn state(State(hub): State<Hub>, Query(window): Query<WindowLang>) -> Json
     let items: Vec<serde_json::Value> = hub
         .items()
         .into_iter()
-        .map(|(item, seen)| {
+        .map(|(item, seen, eligible)| {
             let mut value = serde_json::to_value(&item).unwrap_or_default();
             value["seen"] = serde_json::to_value(&seen).unwrap_or_default();
+            value["eligible"] = json!(eligible);
             value
         })
         .collect();
