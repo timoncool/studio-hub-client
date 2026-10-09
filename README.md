@@ -22,7 +22,8 @@ Only after the start screen has shown its checkbox, and only while it stays chec
 - per day: how many times things were done (songs made, covers, failures) and which models were used;
 - which notices were shown, clicked or closed.
 
-Never: lyrics, prompts, audio, file names or paths, the IP address (the hub does not store it), anything personal.
+Never: lyrics, prompts, audio, file names or paths, the IP address, anything personal. The hub keeps the country
+Cloudflare reports for a direct connection (none through the proxy), not the address.
 `DO_NOT_TRACK=1` or `STUDIO_TELEMETRY=0` turns telemetry off entirely; then no id exists and nothing is counted.
 Notices still arrive: the feed is an anonymous GET with no id. `STUDIO_HUB_TEST=1` receives notices marked as test,
 `STUDIO_HUB_URL` points the client at another hub (a local `wrangler dev`).
