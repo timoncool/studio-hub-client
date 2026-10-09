@@ -1,4 +1,4 @@
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -20,9 +20,18 @@ pub fn router<S: Clone + Send + Sync + 'static>(hub: Hub) -> Router<S> {
         .with_state(hub)
 }
 
+#[derive(Deserialize)]
+struct WindowLang {
+    lang: Option<String>,
+}
+
 /// Everything the window needs: the telemetry choice, where the feed came from, and the notices that fit now,
-/// each with what the user already did with it. The window draws them in its own style.
-async fn state(State(hub): State<Hub>) -> Json<serde_json::Value> {
+/// each with what the user already did with it. The window draws them in its own style and passes its language
+/// as `?lang=`, which also goes into the report.
+async fn state(State(hub): State<Hub>, Query(window): Query<WindowLang>) -> Json<serde_json::Value> {
+    if let Some(lang) = window.lang.as_deref().filter(|l| l.len() >= 2 && l.is_char_boundary(2)) {
+        hub.set_ui_lang(lang);
+    }
     let mut out = hub.status();
     let items: Vec<serde_json::Value> = hub
         .items()
