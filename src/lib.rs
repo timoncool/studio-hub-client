@@ -29,7 +29,11 @@ use state::{CachedFeed, State};
 pub const DIRECT_URL: &str = "https://studio-hub.timoncool.workers.dev";
 pub const PROXY_URL: &str = "https://hub.neuro-cartel.com";
 
-const FEED_EVERY: Duration = Duration::from_secs(6 * 3600);
+/// A conditional request with the feed's tag answers 304 when nothing changed, so asking hourly costs next to nothing.
+const FEED_EVERY: Duration = Duration::from_secs(3600);
+const REPORT_EVERY: Duration = Duration::from_secs(6 * 3600);
+/// After work ends the day's report leaves this much later, so a studio closed soon after does not lose it.
+const REPORT_SOON: Duration = Duration::from_secs(120);
 const REPORT_FIRST: Duration = Duration::from_secs(60);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -103,6 +107,7 @@ struct Inner {
     path: PathBuf,
     state: Mutex<State>,
     ui_lang: Mutex<String>,
+    report_soon: tokio::sync::Notify,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -184,7 +189,7 @@ impl Hub {
         }
         let ui_lang = Mutex::new(config.ui_lang.clone());
         let hub = Hub {
-            inner: Arc::new(Inner { config, urls, test: env_on("STUDIO_HUB_TEST"), disabled_by_env, path, state: Mutex::new(state), ui_lang }),
+            inner: Arc::new(Inner { config, urls, test: env_on("STUDIO_HUB_TEST"), disabled_by_env, path, state: Mutex::new(state), ui_lang, report_soon: tokio::sync::Notify::new() }),
         };
         hub.persist(&hub.lock());
         Ok(hub)
@@ -281,6 +286,7 @@ impl Hub {
             *day.counts.entry(name.to_string()).or_default() += n;
             day.dirty = true;
         });
+        self.inner.report_soon.notify_one();
     }
 
     /// The models used today (short names, at most 20).
@@ -324,6 +330,7 @@ impl Hub {
                 day.dirty = true;
             }
         });
+        self.inner.report_soon.notify_one();
     }
 
     /// Something failed (`kind`: song, analyze, render, ...): counted with its reason, which is scrubbed here, before it
@@ -341,11 +348,17 @@ impl Hub {
                 day.dirty = true;
             }
         });
+        self.inner.report_soon.notify_one();
     }
 
     /// The frontend showed, clicked or closed a notice: remembered always (so it is not shown twice), counted only
     /// with telemetry on.
     pub fn notice(&self, id: &str, event: NoticeEvent) {
+        self.notice_on(id, event, None);
+    }
+
+    /// As [`Hub::notice`], a click naming what was clicked: `b0`, `b1`... for the buttons in order, `link` for a link.
+    pub fn notice_on(&self, id: &str, event: NoticeEvent, button: Option<&str>) {
         let counting = self.telemetry_on();
         self.change(|s| {
             let at = now_secs();
@@ -373,7 +386,12 @@ impl Hub {
                     let c = day.notices.entry(id.to_string()).or_default();
                     match event {
                         NoticeEvent::Shown => c.shown += 1,
-                        NoticeEvent::Clicked => c.clicked += 1,
+                        NoticeEvent::Clicked => {
+                            c.clicked += 1;
+                            if let Some(button) = button.filter(|button| *button == "link" || (button.len() <= 3 && button.starts_with('b') && button[1..].chars().all(|c| c.is_ascii_digit()) && button.len() > 1)) {
+                                *c.buttons.entry(button.to_string()).or_default() += 1;
+                            }
+                        }
                         NoticeEvent::Dismissed => c.dismissed += 1,
                     }
                     day.dirty = true;
@@ -551,7 +569,7 @@ impl Hub {
                 if stale {
                     let _ = feed.refresh().await;
                 }
-                tokio::time::sleep(Duration::from_secs(1800)).await;
+                tokio::time::sleep(Duration::from_secs(600)).await;
             }
         });
         let reports = self.clone();
@@ -559,7 +577,10 @@ impl Hub {
             tokio::time::sleep(REPORT_FIRST).await;
             loop {
                 reports.send_reports().await;
-                tokio::time::sleep(FEED_EVERY).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(REPORT_EVERY) => {}
+                    _ = reports.inner.report_soon.notified() => tokio::time::sleep(REPORT_SOON).await,
+                }
             }
         });
     }

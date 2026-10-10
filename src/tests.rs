@@ -222,3 +222,20 @@ async fn a_model_set_is_one_set_whatever_order_its_parts_came_in_and_a_failure_k
     let sent = serde_json::to_value(&report).unwrap();
     assert!(!sent.to_string().contains("Ivan"));
 }
+
+#[tokio::test]
+async fn a_click_says_which_button_or_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = make_hub(dir.path(), vec![dead().await]);
+    hub.acknowledge(true);
+    hub.notice_on("promo", NoticeEvent::Clicked, Some("b1"));
+    hub.notice_on("promo", NoticeEvent::Clicked, Some("b1"));
+    hub.notice_on("promo", NoticeEvent::Clicked, Some("link"));
+    hub.notice_on("promo", NoticeEvent::Clicked, Some("not a button"));
+    let report = hub.report_for(&today()).unwrap();
+    let promo = report.notices.get("promo").unwrap();
+    assert_eq!(promo.clicked, 4);
+    assert_eq!(promo.buttons.get("b1"), Some(&2));
+    assert_eq!(promo.buttons.get("link"), Some(&1));
+    assert_eq!(promo.buttons.len(), 2);
+}

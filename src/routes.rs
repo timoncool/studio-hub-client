@@ -47,7 +47,13 @@ async fn state(State(hub): State<Hub>, Query(window): Query<WindowLang>) -> Json
     Json(out)
 }
 
-async fn notice(State(hub): State<Hub>, Path((id, event)): Path<(String, String)>) -> Response {
+#[derive(serde::Deserialize)]
+struct NoticeQuery {
+    /// What was clicked: `b0`, `b1`... for the buttons in order, `link` for a link in the text.
+    button: Option<String>,
+}
+
+async fn notice(State(hub): State<Hub>, Path((id, event)): Path<(String, String)>, Query(query): Query<NoticeQuery>) -> Response {
     let event = match event.as_str() {
         "shown" => NoticeEvent::Shown,
         "clicked" => NoticeEvent::Clicked,
@@ -57,7 +63,7 @@ async fn notice(State(hub): State<Hub>, Path((id, event)): Path<(String, String)
     if id.is_empty() || id.len() > 64 || !id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": "bad notice id" }))).into_response();
     }
-    hub.notice(&id, event);
+    hub.notice_on(&id, event, query.button.as_deref());
     Json(json!({ "ok": true })).into_response()
 }
 

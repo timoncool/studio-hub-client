@@ -19,11 +19,14 @@ pub struct CachedFeed {
 }
 
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct NoticeCounts {
     pub shown: u32,
     pub clicked: u32,
     pub dismissed: u32,
+    /// Clicks by what was clicked: `b0`, `b1`... for a notice's buttons in order, `link` for a link in its text.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub buttons: BTreeMap<String, u32>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
