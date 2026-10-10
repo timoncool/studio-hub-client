@@ -199,3 +199,26 @@ async fn only_two_ascii_letters_become_the_report_language() {
     hub.set_ui_lang("x");
     assert_eq!(hub.ui_lang(), "pt");
 }
+
+#[tokio::test]
+async fn a_model_set_is_one_set_whatever_order_its_parts_came_in_and_a_failure_keeps_no_personal_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = make_hub(dir.path(), vec![dead().await]);
+    hub.acknowledge(true);
+    let parts = |list: &[&str]| list.iter().map(|part| part.to_string()).collect::<Vec<_>>();
+    hub.used_models(None, &parts(&["lm-4b-q8", "dit-xl-turbo-q6", "vae-standard-bf16"]));
+    hub.used_models(None, &parts(&["vae-standard-bf16", "lm-4b-q8", "dit-xl-turbo-q6", "lm-4b-q8"]));
+    hub.used_models(Some("quality-q8"), &parts(&["lm-q8", "dit-q8"]));
+    hub.used_models(None, &[]);
+    hub.failed("song", r"open C:\Users\Ivan\Music\x.flac: CUDA error: out of memory");
+    hub.failed("song", r"open D:\other\y.flac: CUDA error: out of memory");
+    hub.failed("Bad Kind", "ignored");
+    let report = hub.report_for(&today()).unwrap();
+    assert_eq!(report.model_sets.len(), 2, "{:?}", report.model_sets);
+    assert!(report.model_sets.iter().any(|set| set.set.is_none() && set.components == ["dit-xl-turbo-q6", "lm-4b-q8", "vae-standard-bf16"]));
+    assert!(report.model_sets.iter().any(|set| set.set.as_deref() == Some("quality-q8") && set.components == ["dit-q8", "lm-q8"]));
+    assert_eq!(report.failures.len(), 1);
+    assert_eq!((report.failures[0].kind.as_str(), report.failures[0].reason.as_str(), report.failures[0].count), ("song", "open <path>: CUDA error: out of memory", 2));
+    let sent = serde_json::to_value(&report).unwrap();
+    assert!(!sent.to_string().contains("Ivan"));
+}

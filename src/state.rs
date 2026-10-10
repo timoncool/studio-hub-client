@@ -26,11 +26,25 @@ pub struct NoticeCounts {
     pub dismissed: u32,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ModelSet {
+    pub set: Option<String>,
+    /// Sorted, so the same parts are one set however they were listed.
+    pub components: Vec<String>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct Day {
     pub counts: BTreeMap<String, u64>,
     pub models: BTreeSet<String>,
     pub notices: BTreeMap<String, NoticeCounts>,
+    /// The model sets the day's work ran on: a ready-made set's name, or none for one put together by hand, and its
+    /// parts either way.
+    #[serde(default)]
+    pub model_sets: BTreeSet<ModelSet>,
+    /// Failures by what failed and why, the why already scrubbed: `kind` and reason joined by a tab.
+    #[serde(default)]
+    pub failures: BTreeMap<String, u32>,
     /// Changed since the hub last accepted this day.
     pub dirty: bool,
 }

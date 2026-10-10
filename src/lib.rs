@@ -10,6 +10,7 @@
 //! telemetry is on and resettable; a report carries counts, never content, paths or the IP.
 
 pub mod feed;
+pub mod scrub;
 mod routes;
 pub mod state;
 
@@ -33,6 +34,14 @@ const REPORT_FIRST: Duration = Duration::from_secs(60);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const REPORT_DAYS: i64 = 14;
+/// The longest model name kept: a set put together by hand is named by its parts.
+pub const MAX_MODEL: usize = 200;
+/// Bounds that keep a report's size sane on a public endpoint; real model sets stay far inside them.
+const MAX_SETS: usize = 20;
+const MAX_COMPONENTS: usize = 64;
+const MAX_NAME: usize = 80;
+/// Different failure reasons kept a day; more of the same reason only count up.
+const MAX_FAILURES: usize = 20;
 /// The global cap across all popups: one a day, besides one per launch.
 const POPUP_GAP: i64 = 24 * 3600;
 
@@ -109,6 +118,19 @@ pub struct Report {
     pub counts: std::collections::BTreeMap<String, u64>,
     pub models: Vec<String>,
     pub notices: std::collections::BTreeMap<String, state::NoticeCounts>,
+    /// The model sets used, with their parts; left out when none was recorded.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub model_sets: Vec<state::ModelSet>,
+    /// What failed and why, scrubbed on this computer; left out of the report when nothing failed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<Failure>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct Failure {
+    pub kind: String,
+    pub reason: String,
+    pub count: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -263,12 +285,56 @@ impl Hub {
 
     /// The models used today (short names, at most 20).
     pub fn used_model(&self, model: &str) {
-        if !self.telemetry_on() || model.is_empty() || model.len() > 40 {
+        if !self.telemetry_on() || model.is_empty() || model.chars().count() > MAX_MODEL {
             return;
         }
         self.change(|s| {
             let day = s.days.entry(today()).or_default();
             if day.models.len() < 20 && day.models.insert(model.to_string()) {
+                day.dirty = true;
+            }
+        });
+    }
+
+    /// The model set a piece of work ran on: `set` names a ready-made set (none for one put together by hand) and
+    /// `components` lists its parts; any studio sends what it has, the same parts in any order are one set.
+    pub fn used_models(&self, set: Option<&str>, components: &[String]) {
+        if !self.telemetry_on() {
+            return;
+        }
+        let clean = |name: &str| -> Option<String> {
+            let name: String = name.trim().chars().filter(|c| !c.is_control()).collect();
+            (!name.is_empty() && name.chars().count() <= MAX_NAME).then_some(name)
+        };
+        let set = set.and_then(clean);
+        let mut parts: Vec<String> = components.iter().filter_map(|c| clean(c)).collect();
+        parts.sort();
+        parts.dedup();
+        parts.truncate(MAX_COMPONENTS);
+        if set.is_none() && parts.is_empty() {
+            return;
+        }
+        let entry = state::ModelSet { set, components: parts };
+        self.change(|s| {
+            let day = s.days.entry(today()).or_default();
+            if day.model_sets.len() < MAX_SETS && day.model_sets.insert(entry) {
+                day.dirty = true;
+            }
+        });
+    }
+
+    /// Something failed (`kind`: song, analyze, render, ...): counted with its reason, which is scrubbed here, before it
+    /// is stored, so nothing about the person is kept or sent. Up to 20 different reasons a day.
+    pub fn failed(&self, kind: &str, reason: &str) {
+        if !self.telemetry_on() || kind.is_empty() || kind.len() > 40 || !kind.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return;
+        }
+        let reason = scrub::reason(reason);
+        let key = format!("{kind}\t{}", if reason.is_empty() { "unknown" } else { reason.as_str() });
+        self.change(|s| {
+            let day = s.days.entry(today()).or_default();
+            if day.failures.len() < MAX_FAILURES || day.failures.contains_key(&key) {
+                *day.failures.entry(key).or_default() += 1;
                 day.dirty = true;
             }
         });
@@ -422,6 +488,12 @@ impl Hub {
             counts: d.counts.clone(),
             models: d.models.iter().cloned().collect(),
             notices: d.notices.clone(),
+            model_sets: d.model_sets.iter().cloned().collect(),
+            failures: d
+                .failures
+                .iter()
+                .filter_map(|(key, count)| key.split_once('\t').map(|(kind, reason)| Failure { kind: kind.into(), reason: reason.into(), count: *count }))
+                .collect(),
         })
     }
 
