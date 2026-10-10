@@ -38,12 +38,13 @@ const REPORT_FIRST: Duration = Duration::from_secs(60);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const REPORT_DAYS: i64 = 14;
-/// The longest model name kept: a set put together by hand is named by its parts.
-pub const MAX_MODEL: usize = 200;
-/// Bounds that keep a report's size sane on a public endpoint; real model sets stay far inside them.
+/// Bounds that keep a report's size sane on a public endpoint; real model sets stay far inside them. The hub refuses a
+/// whole report that breaks one, so every value is checked against the hub's own rules before it is kept.
 const MAX_SETS: usize = 20;
 const MAX_COMPONENTS: usize = 64;
+/// In UTF-16 units, as the hub measures.
 const MAX_NAME: usize = 80;
+const MAX_BUTTONS: usize = 12;
 /// Different failure reasons kept a day; more of the same reason only count up.
 const MAX_FAILURES: usize = 20;
 /// The global cap across all popups: one a day, besides one per launch.
@@ -267,10 +268,7 @@ impl Hub {
 
     /// Adds `n` to a counter of today (names `[a-z][a-z0-9_]{0,31}`, at most 40 a day). Nothing while telemetry is off.
     pub fn count(&self, name: &str, n: u64) {
-        let valid = name.len() <= 32
-            && name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
-            && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
-        if !valid {
+        if !counter_name(name) {
             tracing::warn!("studio hub: counter name {name:?} is not [a-z][a-z0-9_]{{0,31}}, not counted");
             return;
         }
@@ -289,9 +287,10 @@ impl Hub {
         self.inner.report_soon.notify_one();
     }
 
-    /// The models used today (short names, at most 20).
+    /// The models used today (short names of letters, digits, spaces and `._+-`, at most 40, 20 a day).
     pub fn used_model(&self, model: &str) {
-        if !self.telemetry_on() || model.is_empty() || model.chars().count() > MAX_MODEL {
+        let short = (1..=40).contains(&model.len()) && model.chars().all(|c| c.is_ascii_alphanumeric() || " ._+-".contains(c));
+        if !self.telemetry_on() || !short {
             return;
         }
         self.change(|s| {
@@ -310,7 +309,7 @@ impl Hub {
         }
         let clean = |name: &str| -> Option<String> {
             let name: String = name.trim().chars().filter(|c| !c.is_control()).collect();
-            (!name.is_empty() && name.chars().count() <= MAX_NAME).then_some(name)
+            (!name.is_empty() && name.encode_utf16().count() <= MAX_NAME).then_some(name)
         };
         let set = set.and_then(clean);
         let mut parts: Vec<String> = components.iter().filter_map(|c| clean(c)).collect();
@@ -336,7 +335,7 @@ impl Hub {
     /// Something failed (`kind`: song, analyze, render, ...): counted with its reason, which is scrubbed here, before it
     /// is stored, so nothing about the person is kept or sent. Up to 20 different reasons a day.
     pub fn failed(&self, kind: &str, reason: &str) {
-        if !self.telemetry_on() || kind.is_empty() || kind.len() > 40 || !kind.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        if !self.telemetry_on() || !counter_name(kind) {
             return;
         }
         let reason = scrub::reason(reason);
@@ -388,7 +387,8 @@ impl Hub {
                         NoticeEvent::Shown => c.shown += 1,
                         NoticeEvent::Clicked => {
                             c.clicked += 1;
-                            if let Some(button) = button.filter(|button| *button == "link" || (button.len() <= 3 && button.starts_with('b') && button[1..].chars().all(|c| c.is_ascii_digit()) && button.len() > 1)) {
+                            let named = button.filter(|button| *button == "link" || (button.len() <= 3 && button.len() > 1 && button.starts_with('b') && button[1..].chars().all(|c| c.is_ascii_digit())));
+                            if let Some(button) = named.filter(|button| c.buttons.len() < MAX_BUTTONS || c.buttons.contains_key(*button)) {
                                 *c.buttons.entry(button.to_string()).or_default() += 1;
                             }
                         }
@@ -559,8 +559,8 @@ impl Hub {
         }
     }
 
-    /// Starts the background turns inside the current tokio runtime: the feed now if the cache is older than six
-    /// hours and then every six hours; reports a minute after start and then every six hours.
+    /// Starts the background turns inside the current tokio runtime: the feed now if the cache is older than an hour
+    /// and then hourly; reports a minute after start, every six hours, and two minutes after work is recorded.
     pub fn spawn(&self) {
         let feed = self.clone();
         tokio::spawn(async move {
@@ -610,3 +610,10 @@ impl Hub {
 
 #[cfg(test)]
 mod tests;
+
+/// A counter or failure kind as the hub takes it: `[a-z][a-z0-9_]{0,31}`.
+fn counter_name(name: &str) -> bool {
+    name.len() <= 32
+        && name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+        && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}

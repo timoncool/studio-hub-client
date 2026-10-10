@@ -213,7 +213,10 @@ async fn a_model_set_is_one_set_whatever_order_its_parts_came_in_and_a_failure_k
     hub.failed("song", r"open C:\Users\Ivan\Music\x.flac: CUDA error: out of memory");
     hub.failed("song", r"open D:\other\y.flac: CUDA error: out of memory");
     hub.failed("Bad Kind", "ignored");
+    hub.failed("Song", "ignored: the hub takes lowercase kinds only");
+    hub.used_model("a model name far longer than the forty characters the hub takes");
     let report = hub.report_for(&today()).unwrap();
+    assert!(report.models.is_empty(), "{:?}", report.models);
     assert_eq!(report.model_sets.len(), 2, "{:?}", report.model_sets);
     assert!(report.model_sets.iter().any(|set| set.set.is_none() && set.components == ["dit-xl-turbo-q6", "lm-4b-q8", "vae-standard-bf16"] && set.count == 3));
     assert!(report.model_sets.iter().any(|set| set.set.as_deref() == Some("quality-q8") && set.components == ["dit-q8", "lm-q8"] && set.count == 4));

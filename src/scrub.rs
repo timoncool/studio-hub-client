@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
-/// The longest reason kept, in characters.
+/// The longest reason kept, in UTF-16 units, as the hub measures.
 pub const MAX_REASON: usize = 200;
 
 struct Rule {
@@ -34,17 +34,25 @@ fn rules() -> &'static [Rule] {
     })
 }
 
-/// The reason with everything personal replaced, on one line, at most [`MAX_REASON`] characters.
+/// The reason with everything personal replaced, on one line, at most [`MAX_REASON`] UTF-16 units.
 pub fn reason(text: &str) -> String {
     let mut out: String = text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
     for rule in rules() {
         out = rule.pattern.replace_all(&out, rule.with).into_owned();
     }
     let out = out.split_whitespace().collect::<Vec<_>>().join(" ");
-    if out.chars().count() <= MAX_REASON {
+    if out.encode_utf16().count() <= MAX_REASON {
         return out;
     }
-    let mut cut: String = out.chars().take(MAX_REASON - 1).collect();
+    let mut cut = String::new();
+    let mut units = 0;
+    for c in out.chars() {
+        units += c.len_utf16();
+        if units > MAX_REASON - 1 {
+            break;
+        }
+        cut.push(c);
+    }
     cut.push('…');
     cut
 }
@@ -71,5 +79,6 @@ mod tests {
         let long = reason(&"x".repeat(500));
         assert_eq!(long.chars().count(), 200);
         assert!(long.ends_with('…'));
+        assert_eq!(reason(&"🎵".repeat(150)).encode_utf16().count(), 199);
     }
 }
