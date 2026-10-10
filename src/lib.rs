@@ -559,6 +559,13 @@ impl Hub {
         }
     }
 
+    /// Sends what is due now, for a studio that is closing: at most `wait`, so a dead network does not hold the exit.
+    pub async fn flush(&self, wait: Duration) {
+        if tokio::time::timeout(wait, self.send_reports()).await.is_err() {
+            tracing::warn!("studio hub: the reports did not leave before the studio closed; they go at the next start");
+        }
+    }
+
     /// Starts the background turns inside the current tokio runtime: the feed now if the cache is older than an hour
     /// and then hourly; reports a minute after start, every six hours, and two minutes after work is recorded.
     pub fn spawn(&self) {

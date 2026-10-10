@@ -16,6 +16,7 @@ pub fn router<S: Clone + Send + Sync + 'static>(hub: Hub) -> Router<S> {
         .route("/v1/hub/telemetry/reset", post(reset))
         .route("/v1/hub/telemetry/preview", get(preview))
         .route("/v1/hub/refresh", post(refresh))
+        .route("/v1/hub/flush", post(flush))
         .route("/v1/hub/media/{key}", get(media))
         .with_state(hub)
 }
@@ -136,4 +137,10 @@ async fn media(State(hub): State<Hub>, Path(key): Path<String>) -> Response {
         return ([(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, "public, max-age=31536000, immutable")], bytes.to_vec()).into_response();
     }
     StatusCode::NOT_FOUND.into_response()
+}
+
+/// Called by the desktop shell as the studio closes: the day's report leaves now instead of at the next start.
+async fn flush(State(hub): State<Hub>) -> Json<serde_json::Value> {
+    hub.flush(std::time::Duration::from_secs(8)).await;
+    Json(json!({ "ok": true }))
 }

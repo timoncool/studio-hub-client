@@ -242,3 +242,14 @@ async fn a_click_says_which_button_or_link() {
     assert_eq!(promo.buttons.get("link"), Some(&1));
     assert_eq!(promo.buttons.len(), 2);
 }
+
+#[tokio::test]
+async fn a_closing_studio_sends_its_day() {
+    let dir = tempfile::tempdir().unwrap();
+    let mock = Mock::default();
+    let hub = make_hub(dir.path(), vec![serve(mock.clone()).await]);
+    hub.acknowledge(true);
+    hub.count("songs", 1);
+    hub.flush(std::time::Duration::from_secs(5)).await;
+    assert_eq!(mock.reports.lock().unwrap().len(), 1);
+}
