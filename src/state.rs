@@ -31,6 +31,9 @@ pub struct ModelSet {
     pub set: Option<String>,
     /// Sorted, so the same parts are one set however they were listed.
     pub components: Vec<String>,
+    /// Pieces of work done on it that day: people switch sets, and each set counts its own.
+    #[serde(default)]
+    pub count: u64,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -41,7 +44,7 @@ pub struct Day {
     /// The model sets the day's work ran on: a ready-made set's name, or none for one put together by hand, and its
     /// parts either way.
     #[serde(default)]
-    pub model_sets: BTreeSet<ModelSet>,
+    pub model_sets: Vec<ModelSet>,
     /// Failures by what failed and why, the why already scrubbed: `kind` and reason joined by a tab.
     #[serde(default)]
     pub failures: BTreeMap<String, u32>,

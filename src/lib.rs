@@ -298,8 +298,8 @@ impl Hub {
 
     /// The model set a piece of work ran on: `set` names a ready-made set (none for one put together by hand) and
     /// `components` lists its parts; any studio sends what it has, the same parts in any order are one set.
-    pub fn used_models(&self, set: Option<&str>, components: &[String]) {
-        if !self.telemetry_on() {
+    pub fn used_models(&self, set: Option<&str>, components: &[String], count: u64) {
+        if !self.telemetry_on() || count == 0 {
             return;
         }
         let clean = |name: &str| -> Option<String> {
@@ -314,10 +314,13 @@ impl Hub {
         if set.is_none() && parts.is_empty() {
             return;
         }
-        let entry = state::ModelSet { set, components: parts };
         self.change(|s| {
             let day = s.days.entry(today()).or_default();
-            if day.model_sets.len() < MAX_SETS && day.model_sets.insert(entry) {
+            if let Some(known) = day.model_sets.iter_mut().find(|known| known.set == set && known.components == parts) {
+                known.count += count;
+                day.dirty = true;
+            } else if day.model_sets.len() < MAX_SETS {
+                day.model_sets.push(state::ModelSet { set, components: parts, count });
                 day.dirty = true;
             }
         });
@@ -488,7 +491,7 @@ impl Hub {
             counts: d.counts.clone(),
             models: d.models.iter().cloned().collect(),
             notices: d.notices.clone(),
-            model_sets: d.model_sets.iter().cloned().collect(),
+            model_sets: d.model_sets.clone(),
             failures: d
                 .failures
                 .iter()
