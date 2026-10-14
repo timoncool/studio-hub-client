@@ -39,6 +39,14 @@ pub struct ModelSet {
     pub count: u64,
 }
 
+/// How one route of the studio's own API was used in a day: every call, and the calls answered with an error.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct RouteUse {
+    pub calls: u64,
+    #[serde(default)]
+    pub errors: u64,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct Day {
     pub counts: BTreeMap<String, u64>,
@@ -51,6 +59,9 @@ pub struct Day {
     /// Failures by what failed and why, the why already scrubbed: `kind` and reason joined by a tab.
     #[serde(default)]
     pub failures: BTreeMap<String, u32>,
+    /// The studio's API by route template (`POST /api/songs/{id}/stems`): which features are used, never with what.
+    #[serde(default)]
+    pub routes: BTreeMap<String, RouteUse>,
     /// Changed since the hub last accepted this day.
     pub dirty: bool,
 }
@@ -75,6 +86,10 @@ pub struct State {
     #[serde(default)]
     pub last_popup_at: Option<i64>,
     pub seen: BTreeMap<String, NoticeMemory>,
+    /// Picks this install's variant of each experiment; random, kept on this computer and never sent, so it holds
+    /// with telemetry off as well.
+    #[serde(default)]
+    pub bucket_seed: Option<String>,
     pub days: BTreeMap<String, Day>,
 }
 

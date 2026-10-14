@@ -253,3 +253,61 @@ async fn a_closing_studio_sends_its_day() {
     hub.flush(std::time::Duration::from_secs(5)).await;
     assert_eq!(mock.reports.lock().unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn every_call_to_the_studios_api_is_counted_by_its_route_and_nothing_else() {
+    use tower::ServiceExt;
+    let dir = tempfile::tempdir().unwrap();
+    let hub = make_hub(dir.path(), vec![dead().await]);
+    let app: Router = hub.track(
+        Router::new()
+            .route("/api/songs/{id}/stems", post(|| async { "ok" }))
+            .route("/api/songs", get(|| async { "ok" }))
+            .route("/api/broken", post(|| async { StatusCode::INTERNAL_SERVER_ERROR }))
+            .route("/files/{*rest}", get(|| async { "file" }))
+            .merge(hub.router()),
+    );
+    let call = |method: &str, uri: &str| axum::http::Request::builder().method(method).uri(uri).body(axum::body::Body::empty()).unwrap();
+    app.clone().oneshot(call("GET", "/api/songs")).await.unwrap();
+    hub.acknowledge(true);
+    for uri in ["/api/songs/a1/stems", "/api/songs/b2/stems"] {
+        app.clone().oneshot(call("POST", uri)).await.unwrap();
+    }
+    app.clone().oneshot(call("GET", "/api/songs")).await.unwrap();
+    app.clone().oneshot(call("POST", "/api/broken")).await.unwrap();
+    app.clone().oneshot(call("GET", "/files/a/b.js")).await.unwrap();
+    app.clone().oneshot(call("GET", "/v1/hub/state")).await.unwrap();
+    app.clone().oneshot(call("GET", "/nowhere")).await.unwrap();
+    let routes = hub.report_for(&today()).unwrap().routes;
+    let seen: Vec<(&str, u64, u64)> = routes.iter().map(|(k, v)| (k.as_str(), v.calls, v.errors)).collect();
+    assert_eq!(seen, [("GET /api/songs", 1, 0), ("POST /api/broken", 1, 1), ("POST /api/songs/{id}/stems", 2, 0)], "templates, not ids; the call before the choice is not counted");
+
+    hub.send_reports().await;
+    let again = make_hub(dir.path(), vec![dead().await]);
+    assert_eq!(again.lock().days[&today()].routes.len(), 3, "the counts reached the disk with the report turn, sent or not");
+}
+
+#[tokio::test]
+async fn an_install_sees_one_variant_of_an_experiment_and_old_feeds_still_parse() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = make_hub(dir.path(), vec![dead().await]);
+    let mut body = feed();
+    let arm = |id: &str| {
+        let mut v = body["items"][0].clone();
+        v["id"] = serde_json::json!(id);
+        v["experiment"] = serde_json::json!({"id": "donate", "weight": 1});
+        v
+    };
+    body["variants"] = serde_json::json!([arm("donate-a"), arm("donate-b")]);
+    let parsed: Feed = serde_json::from_value(body).unwrap();
+    hub.change(|s| s.feed = Some(CachedFeed { etag: None, feed: parsed, source: "x".into(), fetched_at: now_secs() }));
+    let ids: Vec<String> = hub.items().into_iter().map(|(i, _, _)| i.id).collect();
+    let variants: Vec<&String> = ids.iter().filter(|id| id.starts_with("donate-")).collect();
+    assert_eq!(variants.len(), 1, "{ids:?}");
+    let first = variants[0].clone();
+    let again = make_hub(dir.path(), vec![dead().await]);
+    assert!(again.items().iter().any(|(i, _, _)| i.id == first), "the same variant after a restart");
+
+    let old: Feed = serde_json::from_value(feed()).unwrap();
+    assert!(old.variants.is_empty());
+}
