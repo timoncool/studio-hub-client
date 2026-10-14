@@ -25,6 +25,12 @@ pub fn id() -> Option<String> {
     }
 }
 
+/// [`id`] where the system gives one, and none otherwise: it writes nothing, so a program may ask before the person
+/// chose about statistics (a shell handing the id to its own web page).
+pub fn system_id() -> Option<String> {
+    machine_uid::get().ok().map(|system| system.trim().to_string()).filter(|system| !system.is_empty()).map(|system| derive(&system))
+}
+
 /// HMAC-SHA256 keyed by the system id over [`APP_ID`], its first 16 bytes as a version 4 UUID (RFC 9562), as
 /// `sd_id128_get_machine_app_specific` does.
 pub(crate) fn derive(system: &str) -> String {
@@ -97,5 +103,6 @@ mod tests {
     #[test]
     fn this_computer_has_an_id() {
         assert!(id().is_some_and(|id| uuid::Uuid::parse_str(&id).is_ok()));
+        assert_eq!(system_id(), id(), "where the system gives an id both agree");
     }
 }
