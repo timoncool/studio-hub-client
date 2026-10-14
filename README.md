@@ -15,7 +15,7 @@ hub.worked("song", seconds, work);    // seconds of result in the time the engin
 ```
 
 What every program does the same way with this crate (ids, wiring, counters, computer id, models taken from
-another program, rollout order) is [CONTRACT.md](CONTRACT.md).
+another program, rollout order) is `CONTRACT.md` in the folder that holds every program (`D:\Projects\TEMP\music-studios\CONTRACT.md`).
 
 ## What is sent
 
