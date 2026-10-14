@@ -130,12 +130,18 @@ fn neighbor_files() -> Vec<(PathBuf, String)> {
 }
 
 /// A model file another program already has: the same file name and exactly this size (a download in progress still
-/// carries its `.part` name, so what matches is whole), with that program's id.
-pub fn find_file(name: &std::ffi::OsStr, bytes: u64) -> Option<(PathBuf, String)> {
+/// carries its `.part` name, so what matches is whole), with that program's id. `folder` also asks for the same
+/// folder name: small files (`config.json`, `vocabulary.json`) share names and often sizes between models, and a file
+/// with no checksum to prove it is the one wanted must at least sit in a folder of the same model.
+pub fn find_file(name: &std::ffi::OsStr, bytes: u64, folder: Option<&std::ffi::OsStr>) -> Option<(PathBuf, String)> {
     if bytes == 0 {
         return None;
     }
-    neighbor_files().into_iter().find(|(path, _)| path.file_name() == Some(name) && std::fs::metadata(path).is_ok_and(|meta| meta.len() == bytes))
+    neighbor_files().into_iter().find(|(path, _)| {
+        path.file_name() == Some(name)
+            && folder.is_none_or(|folder| path.parent().and_then(Path::file_name) == Some(folder))
+            && std::fs::metadata(path).is_ok_and(|meta| meta.len() == bytes)
+    })
 }
 
 /// Puts a neighbour's file at `target`: a hard link (one file on disk for both programs) or, with `copy`, a copy where

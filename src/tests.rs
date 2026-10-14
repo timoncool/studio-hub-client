@@ -372,9 +372,10 @@ async fn a_neighbours_model_is_taken_through_a_staged_name_and_left_alone_when_t
     std::fs::write(&source, vec![1u8; 4096]).unwrap();
 
     // the walk is cached for a minute: the neighbour above was registered before the first look
-    let (found, app) = neighbors::find_file(std::ffi::OsStr::new("model.bin"), 4096).expect("found by name and size");
+    let (found, app) = neighbors::find_file(std::ffi::OsStr::new("model.bin"), 4096, Some(std::ffi::OsStr::new("whisper"))).expect("found by name, size and folder");
     assert_eq!((found.as_path(), app.as_str()), (source.as_path(), "dub"));
-    assert!(neighbors::find_file(std::ffi::OsStr::new("model.bin"), 4095).is_none(), "a size off by one is another file");
+    assert!(neighbors::find_file(std::ffi::OsStr::new("model.bin"), 4095, None).is_none(), "a size off by one is another file");
+    assert!(neighbors::find_file(std::ffi::OsStr::new("model.bin"), 4096, Some(std::ffi::OsStr::new("whisper-turbo"))).is_none(), "the same file of another model folder is not taken without a checksum");
 
     let target = own.path().join("karaoke").join("model.bin");
     assert!(neighbors::take_file(&found, &target, false, |_| false).is_err());
