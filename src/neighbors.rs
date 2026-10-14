@@ -67,8 +67,17 @@ impl Drop for Lock {
     }
 }
 
+/// This program's data folder, once it registered: [`current`] reads the others from anywhere in the program.
+static OWN: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The other programs on this computer, as seen by this one ([`register`] first; none before).
+pub fn current() -> Vec<Neighbor> {
+    OWN.get().map(|own| others(own)).unwrap_or_default()
+}
+
 /// Writes this program's line; the lines of programs whose folder is gone are dropped.
 pub fn register(app: &str, version: &str, data_dir: &Path) {
+    let _ = OWN.set(data_dir.to_path_buf());
     let Some(file) = registry_file() else { return };
     if let Some(parent) = file.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
