@@ -101,12 +101,16 @@ const SEARCH_DEPTH: usize = 6;
 /// The neighbours' files are walked at most this often: setup screens ask every second or two.
 const WALK_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Folders of a data folder that hold the person's own work and the program itself, never models (CONTRACT.md): not
+/// searched, so projects with thousands of takes cost nothing and no user file is offered as a model.
+const NOT_MODELS: &[&str] = &["workspace", "media", "processing", "midi", "voices", "skins", "logs", "frontend", "fonts", "recordings", "projects"];
+
 fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for path in entries.flatten().map(|entry| entry.path()) {
         if path.is_file() {
             out.push(path);
-        } else if depth > 0 && path.is_dir() && !path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.starts_with('.')) {
+        } else if depth > 0 && path.is_dir() && !path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.starts_with('.') || NOT_MODELS.contains(&name)) {
             walk(&path, depth - 1, out);
         }
     }
@@ -137,11 +141,31 @@ pub fn find_file(name: &std::ffi::OsStr, bytes: u64, folder: Option<&std::ffi::O
     if bytes == 0 {
         return None;
     }
+    let refused = lock(&REFUSED).clone();
     neighbor_files().into_iter().find(|(path, _)| {
         path.file_name() == Some(name)
             && folder.is_none_or(|folder| path.parent().and_then(Path::file_name) == Some(folder))
+            && !refused.contains(path)
             && std::fs::metadata(path).is_ok_and(|meta| meta.len() == bytes)
     })
+}
+
+/// Neighbours' files that failed a program's check in this run: not offered again, so a checksum of gigabytes is not
+/// repeated on every poll of a setup screen.
+static REFUSED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+/// Targets being taken right now: a second caller (two polls at once) does not stage over the first one's file.
+static TAKING: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+struct Taking(PathBuf);
+
+impl Drop for Taking {
+    fn drop(&mut self) {
+        lock(&TAKING).retain(|target| *target != self.0);
+    }
 }
 
 /// Puts a neighbour's file at `target`: a hard link (one file on disk for both programs) or, with `copy`, a copy where
@@ -149,6 +173,14 @@ pub fn find_file(name: &std::ffi::OsStr, bytes: u64, folder: Option<&std::ffi::O
 /// published by rename only once `accept` passes on it (a checksum, where the program has one); whatever fails, the
 /// staged file is removed, so the neighbour's file is never left linked under a name something writes to.
 pub fn take_file(source: &Path, target: &Path, copy: bool, accept: impl FnOnce(&Path) -> bool) -> std::io::Result<()> {
+    let _taking = {
+        let mut taking = lock(&TAKING);
+        if taking.iter().any(|busy| busy == target) {
+            return Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, format!("{} is being taken already", target.display())));
+        }
+        taking.push(target.to_path_buf());
+        Taking(target.to_path_buf())
+    };
     let staged = PathBuf::from(format!("{}.neighbor", target.display()));
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)?;
@@ -163,6 +195,7 @@ pub fn take_file(source: &Path, target: &Path, copy: bool, accept: impl FnOnce(&
         if accept(&staged) {
             std::fs::rename(&staged, target)
         } else {
+            lock(&REFUSED).push(source.to_path_buf());
             Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{} did not pass the check", source.display())))
         }
     });

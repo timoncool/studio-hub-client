@@ -372,16 +372,21 @@ async fn a_neighbours_model_is_taken_through_a_staged_name_and_left_alone_when_t
     let source = other.path().join("models").join("whisper").join("model.bin");
     std::fs::create_dir_all(source.parent().unwrap()).unwrap();
     std::fs::write(&source, vec![1u8; 4096]).unwrap();
+    let in_a_project = other.path().join("workspace").join("p1").join("take.bin");
+    std::fs::create_dir_all(in_a_project.parent().unwrap()).unwrap();
+    std::fs::write(&in_a_project, vec![1u8; 4096]).unwrap();
 
     // the walk is cached for a minute: the neighbour above was registered before the first look
     let (found, app) = neighbors::find_file(std::ffi::OsStr::new("model.bin"), 4096, Some(std::ffi::OsStr::new("whisper"))).expect("found by name, size and folder");
     assert_eq!((found.as_path(), app.as_str()), (source.as_path(), "dub"));
     assert!(neighbors::find_file(std::ffi::OsStr::new("model.bin"), 4095, None).is_none(), "a size off by one is another file");
     assert!(neighbors::find_file(std::ffi::OsStr::new("model.bin"), 4096, Some(std::ffi::OsStr::new("whisper-turbo"))).is_none(), "the same file of another model folder is not taken without a checksum");
+    assert!(neighbors::find_file(std::ffi::OsStr::new("take.bin"), 4096, None).is_none(), "a program's projects are not searched for models");
 
     let target = own.path().join("karaoke").join("model.bin");
     assert!(neighbors::take_file(&found, &target, false, |_| false).is_err());
     assert!(!target.exists() && !PathBuf::from(format!("{}.neighbor", target.display())).exists(), "nothing stays behind a failed check");
+    assert!(neighbors::find_file(std::ffi::OsStr::new("model.bin"), 4096, None).is_none(), "a file that failed the check is not offered again");
     neighbors::take_file(&found, &target, false, |staged| std::fs::metadata(staged).is_ok_and(|m| m.len() == 4096)).unwrap();
     std::fs::write(&source, vec![2u8; 4096]).unwrap();
     assert_eq!(std::fs::read(&target).unwrap()[0], 2, "a hard link: one file on disk");
