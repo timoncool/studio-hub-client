@@ -18,7 +18,11 @@ hub.worked("song", seconds, work);    // seconds of result in the time the engin
 
 Only after the start screen has shown its checkbox, and only while it stays checked:
 
-- a random install id (UUID v4) made on this computer, not tied to hardware or an account; Settings can reset it;
+- a random install id (UUID v4) made on this computer; Settings can reset it;
+- a computer id, the same in every program of timoncool's, so the hub counts people as well as installs: an
+  HMAC-SHA256 of the system's machine id (Windows MachineGuid, Linux machine-id, macOS IOPlatformUUID) over a
+  constant of ours, as systemd derives application ids. The system id itself is never sent and cannot be recovered
+  from it; where the system has none, a random id kept in the shared `timoncool` folder of the user is used;
 - the program, its version, the OS name and version, the window language;
 - the graphics card as vendor, a VRAM bucket (≤8, 12, 16, 24+ GB) and the backend (cuda, vulkan, cpu);
 - per day: how many times things were done (songs made, covers, failures) and which models were used;

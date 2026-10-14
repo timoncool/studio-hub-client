@@ -10,6 +10,7 @@
 //! telemetry is on and resettable; a report carries counts, never content, paths or the IP.
 
 pub mod feed;
+pub mod machine;
 pub mod scrub;
 mod routes;
 pub mod state;
@@ -111,12 +112,16 @@ struct Inner {
     state: Mutex<State>,
     ui_lang: Mutex<String>,
     report_soon: tokio::sync::Notify,
+    machine: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct Report {
     pub schema: u32,
     pub install: String,
+    /// This computer, the same in every program of timoncool's ([`machine::id`]): people, not only installs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
     pub app: String,
     pub version: String,
     pub day: String,
@@ -196,7 +201,17 @@ impl Hub {
         state.bucket_seed.get_or_insert_with(|| uuid::Uuid::new_v4().to_string());
         let ui_lang = Mutex::new(config.ui_lang.clone());
         let hub = Hub {
-            inner: Arc::new(Inner { config, urls, test: env_on("STUDIO_HUB_TEST"), disabled_by_env, path, state: Mutex::new(state), ui_lang, report_soon: tokio::sync::Notify::new() }),
+            inner: Arc::new(Inner {
+                config,
+                urls,
+                test: env_on("STUDIO_HUB_TEST"),
+                disabled_by_env,
+                path,
+                state: Mutex::new(state),
+                ui_lang,
+                report_soon: tokio::sync::Notify::new(),
+                machine: if disabled_by_env { None } else { machine::id() },
+            }),
         };
         hub.persist(&hub.lock());
         Ok(hub)
@@ -558,6 +573,7 @@ impl Hub {
         Some(Report {
             schema: 1,
             install,
+            machine: self.inner.machine.clone(),
             app: self.inner.config.app.clone(),
             version: self.inner.config.version.clone(),
             day: day.to_string(),
