@@ -9,7 +9,9 @@ let hub = studio_hub_client::Hub::new(HubConfig {
 })?;
 hub.spawn();                          // feed every 6 h, reports a minute after start and every 6 h
 let app = hub.track(app.merge(hub.router()));  // /v1/hub/* for the window; every API call counted by route
-hub.count("songs", 1);                // results the routes cannot see: songs made, seconds rendered
+hub.count("songs", 1);                // results the routes cannot see: songs made
+hub.setup_ready();                    // models downloaded (or hub.setup_failed(reason))
+hub.worked("song", seconds, work);    // seconds of result in the time the engine had to itself: speed by card
 ```
 
 ## What is sent

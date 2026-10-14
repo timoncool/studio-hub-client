@@ -320,3 +320,20 @@ async fn an_install_sees_one_variant_of_an_experiment_and_old_feeds_still_parse(
     let old: Feed = serde_json::from_value(feed()).unwrap();
     assert!(old.variants.is_empty());
 }
+
+#[tokio::test]
+async fn setup_and_speed_use_the_names_the_hub_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = make_hub(dir.path(), vec![dead().await]);
+    hub.acknowledge(true);
+    hub.setup_ready();
+    hub.setup_failed("GET https://huggingface.co/x timed out");
+    hub.worked("song", 144.9, Duration::from_secs(1460));
+    hub.worked("song", 0.0, Duration::from_secs(5));
+    let report = hub.report_for(&today()).unwrap();
+    assert_eq!(report.counts.get("setup_ready"), Some(&1));
+    assert_eq!(report.counts.get("setup_failed"), Some(&1));
+    assert_eq!((report.counts.get("song_media_s"), report.counts.get("song_work_s")), (Some(&145), Some(&1460)));
+    assert_eq!(report.failures[0].kind, "setup");
+    assert_eq!(report.failures[0].reason, "GET <url> timed out");
+}

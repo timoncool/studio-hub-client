@@ -356,6 +356,28 @@ impl Hub {
         self.inner.report_soon.notify_one();
     }
 
+    /// The models got ready (a download finished): the step between installing and the first result in the hub's
+    /// weekly install report.
+    pub fn setup_ready(&self) {
+        self.count("setup_ready", 1);
+    }
+
+    /// A model download failed: counted for the install report and kept with its reason, which is scrubbed here.
+    pub fn setup_failed(&self, reason: &str) {
+        self.count("setup_failed", 1);
+        self.failed("setup", reason);
+    }
+
+    /// Seconds of result (`kind` song, analyze...) made in `work`, for the hub's speed by card class. Only work that
+    /// had the engine to itself measures the card: time spent waiting behind another job would read as a slow card.
+    pub fn worked(&self, kind: &str, result_seconds: f64, work: Duration) {
+        if result_seconds <= 0.0 || !result_seconds.is_finite() {
+            return;
+        }
+        self.count(&format!("{kind}_media_s"), result_seconds.round() as u64);
+        self.count(&format!("{kind}_work_s"), work.as_secs_f64().round().max(1.0) as u64);
+    }
+
     /// A call to the studio's own API, by its route template; [`Hub::track`] records every call by itself. Kept in
     /// memory and written with the next save, so a window polling every second costs no disk writes. A call does not
     /// make the day one to report: the routes go along with a day that counted something, so a launch where the
