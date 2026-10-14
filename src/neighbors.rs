@@ -153,7 +153,12 @@ pub fn find_file(name: &std::ffi::OsStr, bytes: u64, folder: Option<&std::ffi::O
 /// Neighbours' files that failed a program's check in this run: not offered again, so a checksum of gigabytes is not
 /// repeated on every poll of a setup screen.
 static REFUSED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
-/// Targets being taken right now: a second caller (two polls at once) does not stage over the first one's file.
+/// A check that was cut short (the person cancelled) said nothing about the file: it is offered again.
+pub fn reconsider(source: &Path) {
+    lock(&REFUSED).retain(|refused| refused != source);
+}
+
+/// Targets being taken right now: a second caller (two polls at once) waits for the first instead of staging over it.
 static TAKING: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
 
 fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -173,14 +178,19 @@ impl Drop for Taking {
 /// published by rename only once `accept` passes on it (a checksum, where the program has one); whatever fails, the
 /// staged file is removed, so the neighbour's file is never left linked under a name something writes to.
 pub fn take_file(source: &Path, target: &Path, copy: bool, accept: impl FnOnce(&Path) -> bool) -> std::io::Result<()> {
-    let _taking = {
+    let _taking = loop {
         let mut taking = lock(&TAKING);
-        if taking.iter().any(|busy| busy == target) {
-            return Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, format!("{} is being taken already", target.display())));
+        if !taking.iter().any(|busy| busy == target) {
+            taking.push(target.to_path_buf());
+            break Taking(target.to_path_buf());
         }
-        taking.push(target.to_path_buf());
-        Taking(target.to_path_buf())
+        drop(taking);
+        std::thread::sleep(std::time::Duration::from_millis(100));
     };
+    // the caller that held the target took it meanwhile
+    if target.exists() {
+        return Ok(());
+    }
     let staged = PathBuf::from(format!("{}.neighbor", target.display()));
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)?;

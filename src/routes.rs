@@ -146,10 +146,10 @@ async fn flush(State(hub): State<Hub>) -> Json<serde_json::Value> {
     Json(json!({ "ok": true }))
 }
 
-/// Counts a call by the route it matched; a request no route matched (static files, the fallback) has none.
 /// A call the window makes by itself (`x-hub-skip: 1`), such as telling the server its language at start, is no feature.
 pub const SKIP_HEADER: &str = "x-hub-skip";
 
+/// Counts a call by the route it matched; a request no route matched (static files, the fallback) has none.
 pub(crate) async fn count_route(State(hub): State<Hub>, request: Request, next: Next) -> Response {
     let skipped = request.headers().contains_key(SKIP_HEADER);
     let route = request.extensions().get::<MatchedPath>().map(|path| path.as_str().to_owned()).filter(|_| !skipped);
