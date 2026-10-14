@@ -264,6 +264,8 @@ async fn every_call_to_the_studios_api_is_counted_by_its_route_and_nothing_else(
             .route("/api/songs/{id}/stems", post(|| async { "ok" }))
             .route("/api/songs", get(|| async { "ok" }))
             .route("/api/broken", post(|| async { StatusCode::INTERNAL_SERVER_ERROR }))
+            .route("/api/jobs/{id}", get(|| async { StatusCode::NOT_FOUND }))
+            .route("/mcp", post(|| async { "ok" }))
             .route("/files/{*rest}", get(|| async { "file" }))
             .merge(hub.router()),
     );
@@ -278,13 +280,20 @@ async fn every_call_to_the_studios_api_is_counted_by_its_route_and_nothing_else(
     app.clone().oneshot(call("GET", "/files/a/b.js")).await.unwrap();
     app.clone().oneshot(call("GET", "/v1/hub/state")).await.unwrap();
     app.clone().oneshot(call("GET", "/nowhere")).await.unwrap();
+    app.clone().oneshot(call("GET", "/api/jobs/gone")).await.unwrap();
+    app.clone().oneshot(call("POST", "/mcp")).await.unwrap();
     let routes = hub.report_for(&today()).unwrap().routes;
     let seen: Vec<(&str, u64, u64)> = routes.iter().map(|(k, v)| (k.as_str(), v.calls, v.errors)).collect();
-    assert_eq!(seen, [("GET /api/songs", 1, 0), ("POST /api/broken", 1, 1), ("POST /api/songs/{id}/stems", 2, 0)], "templates, not ids; the call before the choice is not counted");
+    assert_eq!(
+        seen,
+        [("GET /api/jobs/{id}", 1, 0), ("GET /api/songs", 1, 0), ("POST /api/broken", 1, 1), ("POST /api/songs/{id}/stems", 2, 0)],
+        "templates, not ids; the call before the choice, the MCP transport and the hub's own routes are not counted; a 404 is no error"
+    );
+    assert!(!hub.lock().days[&today()].dirty, "calls alone do not make a day to report");
 
     hub.send_reports().await;
     let again = make_hub(dir.path(), vec![dead().await]);
-    assert_eq!(again.lock().days[&today()].routes.len(), 3, "the counts reached the disk with the report turn, sent or not");
+    assert_eq!(again.lock().days[&today()].routes.len(), 4, "the counts reached the disk with the report turn, sent or not");
 }
 
 #[tokio::test]

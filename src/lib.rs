@@ -357,7 +357,9 @@ impl Hub {
     }
 
     /// A call to the studio's own API, by its route template; [`Hub::track`] records every call by itself. Kept in
-    /// memory and written with the next save, so a window polling every second costs no disk writes.
+    /// memory and written with the next save, so a window polling every second costs no disk writes. A call does not
+    /// make the day one to report: the routes go along with a day that counted something, so a launch where the
+    /// window only polled stays out of the active installs as before.
     pub fn used_route(&self, method: &str, route: &str, failed: bool) {
         let Some(key) = route_key(method, route) else { return };
         if !self.telemetry_on() {
@@ -373,7 +375,6 @@ impl Hub {
         if failed {
             used.errors += 1;
         }
-        day.dirty = true;
     }
 
     /// The studio's router with every call to its API counted by route template, as the features people use: a
@@ -656,7 +657,8 @@ impl Hub {
 #[cfg(test)]
 mod tests;
 
-/// `METHOD /route/{param}` as the hub takes it, for a route worth counting: not the hub's own, not a wildcard.
+/// `METHOD /route/{param}` as the hub takes it, for a route worth counting: not the hub's own, not the MCP transport
+/// (an agent's tools reach the studio's routes, which count), not a wildcard.
 fn route_key(method: &str, route: &str) -> Option<String> {
     let method = match method {
         "GET" | "POST" | "PUT" | "PATCH" | "DELETE" => method,
@@ -665,6 +667,8 @@ fn route_key(method: &str, route: &str) -> Option<String> {
     let fits = route.starts_with('/')
         && route.len() <= 120
         && !route.starts_with("/v1/hub/")
+        && route != "/mcp"
+        && !route.starts_with("/mcp/")
         && !route.contains('*')
         && route.chars().all(|c| c.is_ascii_alphanumeric() || "_./{}:-".contains(c));
     fits.then(|| format!("{method} {route}"))

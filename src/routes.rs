@@ -152,8 +152,9 @@ pub(crate) async fn count_route(State(hub): State<Hub>, request: Request, next: 
     let method = request.method().as_str().to_owned();
     let response = next.run(request).await;
     if let Some(route) = route {
+        // a 404 is a window asking about something already gone (a finished job), not a feature failing
         let status = response.status();
-        hub.used_route(&method, &route, status.is_client_error() || status.is_server_error());
+        hub.used_route(&method, &route, status.is_server_error() || (status.is_client_error() && status != StatusCode::NOT_FOUND));
     }
     response
 }
