@@ -293,12 +293,14 @@ async fn every_call_to_the_studios_api_is_counted_by_its_route_and_nothing_else(
     app.clone().oneshot(call("GET", "/nowhere")).await.unwrap();
     app.clone().oneshot(call("GET", "/api/jobs/gone")).await.unwrap();
     app.clone().oneshot(call("POST", "/mcp")).await.unwrap();
+    let by_itself = axum::http::Request::builder().method("POST").uri("/api/songs/c3/stems").header(crate::routes::SKIP_HEADER, "1").body(axum::body::Body::empty()).unwrap();
+    app.clone().oneshot(by_itself).await.unwrap();
     let routes = hub.report_for(&today()).unwrap().routes;
     let seen: Vec<(&str, u64, u64)> = routes.iter().map(|(k, v)| (k.as_str(), v.calls, v.errors)).collect();
     assert_eq!(
         seen,
         [("GET /api/jobs/{id}", 1, 0), ("GET /api/songs", 1, 0), ("POST /api/broken", 1, 1), ("POST /api/songs/{id}/stems", 2, 0)],
-        "templates, not ids; the call before the choice, the MCP transport and the hub's own routes are not counted; a 404 is no error"
+        "templates, not ids; the call before the choice, the MCP transport, the hub's own routes and a call the window makes by itself are not counted; a 404 is no error"
     );
     assert!(!hub.lock().days[&today()].dirty, "calls alone do not make a day to report");
 

@@ -30,7 +30,8 @@ Only after the start screen has shown its checkbox, and only while it stays chec
 - the graphics card as vendor, a VRAM bucket (≤8, 12, 16, 24+ GB) and the backend (cuda, vulkan, cpu);
 - per day: how many times things were done (songs made, covers, failures) and which models were used;
 - per day: which routes of the studio's own local API were called and how many answered with an error, by route
-  template (`POST /api/songs/{id}/stems`), never with the ids, the request or the answer: the features people use;
+  template (`POST /api/songs/{id}/stems`), never with the ids, the request or the answer: the features people use (a
+  call the window makes by itself carries `x-hub-skip: 1` and is not counted);
 - which notices were shown, clicked or closed.
 
 Never: lyrics, prompts, audio, file names or paths, the IP address, anything personal. The hub keeps the country
