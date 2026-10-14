@@ -40,7 +40,11 @@ pub(crate) fn derive(system: &str) -> String {
 
 /// The folder all of timoncool's programs share on this computer: `%LOCALAPPDATA%\timoncool` on Windows,
 /// `~/Library/Application Support/timoncool` on macOS, `$XDG_DATA_HOME/timoncool` (or `~/.local/share`) elsewhere.
+/// `TIMONCOOL_SHARED_DIR` replaces it (tests, a second profile).
 pub fn shared_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("TIMONCOOL_SHARED_DIR") {
+        return Some(PathBuf::from(dir));
+    }
     let base = if cfg!(windows) {
         std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
     } else if cfg!(target_os = "macos") {

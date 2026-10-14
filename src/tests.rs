@@ -73,8 +73,16 @@ async fn dead() -> String {
     format!("http://{addr}")
 }
 
-fn make_hub(dir: &std::path::Path, urls: Vec<String>) -> Hub {
-    Hub::new(HubConfig {
+/// The programs' shared folder of the tests, so they never write into the real one of this user.
+fn isolate_shared_dir() {
+    static SHARED: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    let dir = SHARED.get_or_init(|| tempfile::tempdir().unwrap());
+    std::env::set_var("TIMONCOOL_SHARED_DIR", dir.path());
+}
+
+fn config_for(dir: &std::path::Path) -> HubConfig {
+    isolate_shared_dir();
+    HubConfig {
         app: "yue2".into(),
         version: "3.5.0".into(),
         data_dir: dir.to_path_buf(),
@@ -82,9 +90,12 @@ fn make_hub(dir: &std::path::Path, urls: Vec<String>) -> Hub {
         os_label: "windows 11".into(),
         gpu: Gpu { vendor: "nvidia".into(), vram_gb: Gpu::vram_bucket(24 * 1_073_741_824), backend: "cuda".into() },
         ui_lang: "ru".into(),
-        urls,
-    })
-    .unwrap()
+        urls: Vec::new(),
+    }
+}
+
+fn make_hub(dir: &std::path::Path, urls: Vec<String>) -> Hub {
+    Hub::new(HubConfig { urls, ..config_for(dir) }).unwrap()
 }
 
 #[tokio::test]
@@ -336,4 +347,17 @@ async fn setup_and_speed_use_the_names_the_hub_reads() {
     assert_eq!((report.counts.get("song_media_s"), report.counts.get("song_work_s")), (Some(&145), Some(&1460)));
     assert_eq!(report.failures[0].kind, "setup");
     assert_eq!(report.failures[0].reason, "GET <url> timed out");
+}
+
+#[tokio::test]
+async fn each_program_finds_the_others_and_not_itself() {
+    let (yue2, dub) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let first = make_hub(yue2.path(), vec![dead().await]);
+    let second = Hub::new(HubConfig { app: "dub".into(), ..config_for(dub.path()) }).unwrap();
+    assert!(first.neighbors().iter().any(|n| n.app == "dub" && n.data_dir == dub.path()));
+    assert!(second.neighbors().iter().any(|n| n.app == "yue2" && n.data_dir == yue2.path()));
+    assert!(!first.neighbors().iter().any(|n| n.data_dir == yue2.path()), "not itself");
+    let gone = dub.path().to_path_buf();
+    drop(dub);
+    assert!(!first.neighbors().iter().any(|n| n.data_dir == gone), "a program whose folder is gone is no neighbour");
 }

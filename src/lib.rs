@@ -11,6 +11,7 @@
 
 pub mod feed;
 pub mod machine;
+pub mod neighbors;
 pub mod scrub;
 mod routes;
 pub mod state;
@@ -189,6 +190,7 @@ impl Hub {
         };
         let path = config.data_dir.join("studio-hub.json");
         let mut state = State::load(&path)?;
+        neighbors::register(&config.app, &config.version, &config.data_dir);
         let disabled_by_env = env_on("DO_NOT_TRACK") || env_off("STUDIO_TELEMETRY");
         if disabled_by_env {
             state.install = None;
@@ -667,6 +669,11 @@ impl Hub {
                 }
             }
         });
+    }
+
+    /// The other programs of timoncool's on this computer and their data folders, to take models from.
+    pub fn neighbors(&self) -> Vec<neighbors::Neighbor> {
+        neighbors::others(&self.inner.config.data_dir)
     }
 
     /// The axum routes the studio's frontend talks to, under `/v1/hub`.
