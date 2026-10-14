@@ -113,7 +113,8 @@ struct Inner {
     state: Mutex<State>,
     ui_lang: Mutex<String>,
     report_soon: tokio::sync::Notify,
-    machine: Option<String>,
+    /// Worked out with the first report, so nothing of it (not even the shared fallback file) exists before consent.
+    machine: std::sync::OnceLock<Option<String>>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -212,7 +213,7 @@ impl Hub {
                 state: Mutex::new(state),
                 ui_lang,
                 report_soon: tokio::sync::Notify::new(),
-                machine: if disabled_by_env { None } else { machine::id() },
+                machine: std::sync::OnceLock::new(),
             }),
         };
         hub.persist(&hub.lock());
@@ -575,7 +576,7 @@ impl Hub {
         Some(Report {
             schema: 1,
             install,
-            machine: self.inner.machine.clone(),
+            machine: self.inner.machine.get_or_init(machine::id).clone(),
             app: self.inner.config.app.clone(),
             version: self.inner.config.version.clone(),
             day: day.to_string(),

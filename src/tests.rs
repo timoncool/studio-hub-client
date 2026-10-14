@@ -361,3 +361,25 @@ async fn each_program_finds_the_others_and_not_itself() {
     drop(dub);
     assert!(!first.neighbors().iter().any(|n| n.data_dir == gone), "a program whose folder is gone is no neighbour");
 }
+
+#[tokio::test]
+async fn a_neighbours_model_is_taken_through_a_staged_name_and_left_alone_when_the_check_fails() {
+    let (own, other) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let _first = make_hub(own.path(), vec![dead().await]);
+    let _second = Hub::new(HubConfig { app: "dub".into(), ..config_for(other.path()) }).unwrap();
+    let source = other.path().join("models").join("whisper").join("model.bin");
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+    std::fs::write(&source, vec![1u8; 4096]).unwrap();
+
+    // the walk is cached for a minute: the neighbour above was registered before the first look
+    let (found, app) = neighbors::find_file(std::ffi::OsStr::new("model.bin"), 4096).expect("found by name and size");
+    assert_eq!((found.as_path(), app.as_str()), (source.as_path(), "dub"));
+    assert!(neighbors::find_file(std::ffi::OsStr::new("model.bin"), 4095).is_none(), "a size off by one is another file");
+
+    let target = own.path().join("karaoke").join("model.bin");
+    assert!(neighbors::take_file(&found, &target, false, |_| false).is_err());
+    assert!(!target.exists() && !PathBuf::from(format!("{}.neighbor", target.display())).exists(), "nothing stays behind a failed check");
+    neighbors::take_file(&found, &target, false, |staged| std::fs::metadata(staged).is_ok_and(|m| m.len() == 4096)).unwrap();
+    std::fs::write(&source, vec![2u8; 4096]).unwrap();
+    assert_eq!(std::fs::read(&target).unwrap()[0], 2, "a hard link: one file on disk");
+}
