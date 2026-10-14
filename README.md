@@ -14,6 +14,9 @@ hub.setup_ready();                    // models downloaded (or hub.setup_failed(
 hub.worked("song", seconds, work);    // seconds of result in the time the engine had to itself: speed by card
 ```
 
+What every program does the same way with this crate (ids, wiring, counters, computer id, models taken from
+another program, rollout order) is [CONTRACT.md](CONTRACT.md).
+
 ## What is sent
 
 Only after the start screen has shown its checkbox, and only while it stays checked:
