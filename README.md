@@ -8,18 +8,30 @@ let hub = studio_hub_client::Hub::new(HubConfig {
     app: "yue2".into(), version: env!("CARGO_PKG_VERSION").into(), data_dir, http, os_label, gpu, ui_lang, urls: vec![],
 })?;
 hub.spawn();                          // feed every 6 h, reports a minute after start and every 6 h
-let app = app.merge(hub.router());    // /v1/hub/* for the window
-hub.count("songs", 1);                // what users do: counts only
+let app = hub.track(app.merge(hub.router()));  // /v1/hub/* for the window; every API call counted by route
+hub.count("songs", 1);                // results the routes cannot see: songs made
+hub.setup_ready();                    // models downloaded (or hub.setup_failed(reason))
+hub.worked("song", seconds, work);    // seconds of result in the time the engine had to itself: speed by card
 ```
+
+What every program does the same way with this crate (ids, wiring, counters, computer id, models taken from
+another program, rollout order) is `CONTRACT.md` in the folder that holds every program (`D:\Projects\TEMP\music-studios\CONTRACT.md`).
 
 ## What is sent
 
 Only after the start screen has shown its checkbox, and only while it stays checked:
 
-- a random install id (UUID v4) made on this computer, not tied to hardware or an account; Settings can reset it;
+- a random install id (UUID v4) made on this computer; Settings can reset it;
+- a computer id, the same in every program of timoncool's, so the hub counts people as well as installs: an
+  HMAC-SHA256 of the system's machine id (Windows MachineGuid, Linux machine-id, macOS IOPlatformUUID) over a
+  constant of ours, as systemd derives application ids. The system id itself is never sent and cannot be recovered
+  from it; where the system has none, a random id kept in the shared `timoncool` folder of the user is used;
 - the program, its version, the OS name and version, the window language;
 - the graphics card as vendor, a VRAM bucket (≤8, 12, 16, 24+ GB) and the backend (cuda, vulkan, cpu);
 - per day: how many times things were done (songs made, covers, failures) and which models were used;
+- per day: which routes of the studio's own local API were called and how many answered with an error, by route
+  template (`POST /api/songs/{id}/stems`), never with the ids, the request or the answer: the features people use (a
+  call the window makes by itself carries `x-hub-skip: 1` and is not counted);
 - which notices were shown, clicked or closed.
 
 Never: lyrics, prompts, audio, file names or paths, the IP address, anything personal. The hub keeps the country
@@ -39,6 +51,14 @@ Notices still arrive: the feed is an anonymous GET with no id. `STUDIO_HUB_TEST=
 | `POST /v1/hub/telemetry/reset` | a new install id |
 | `POST /v1/hub/refresh` | fetch the feed now |
 | `GET /v1/hub/media/{key}` | a notice image, cached in the data folder |
+
+## Experiments
+
+A notice can be one variant of an A/B test (`experiment: {id, weight}`). The hub sends variants apart from the other
+notices (`variants` in the feed), so a client that predates experiments shows none of them. Each install sees one
+variant of each experiment, picked by weight from a bucket of a random seed kept on this computer (never sent) and
+the experiment id: the same variant at every start, unrelated between experiments. The hub's site embed computes
+the same bucket (`feed::bucket`, FNV-1a and the MurmurHash3 finaliser).
 
 The window draws the notices in its own style: bars as a stack across the top (at most three, a colour per place
 unless the notice names one), one popup per launch, news in the News list.

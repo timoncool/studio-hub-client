@@ -10,6 +10,8 @@
 //! telemetry is on and resettable; a report carries counts, never content, paths or the IP.
 
 pub mod feed;
+pub mod machine;
+pub mod neighbors;
 pub mod scrub;
 mod routes;
 pub mod state;
@@ -47,6 +49,8 @@ const MAX_NAME: usize = 80;
 const MAX_BUTTONS: usize = 12;
 /// Different failure reasons kept a day; more of the same reason only count up.
 const MAX_FAILURES: usize = 20;
+/// Different API routes kept a day; a studio has a few dozen.
+const MAX_ROUTES: usize = 120;
 /// The global cap across all popups: one a day, besides one per launch.
 const POPUP_GAP: i64 = 24 * 3600;
 
@@ -109,12 +113,17 @@ struct Inner {
     state: Mutex<State>,
     ui_lang: Mutex<String>,
     report_soon: tokio::sync::Notify,
+    /// Worked out with the first report, so nothing of it (not even the shared fallback file) exists before consent.
+    machine: std::sync::OnceLock<Option<String>>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct Report {
     pub schema: u32,
     pub install: String,
+    /// This computer, the same in every program of timoncool's ([`machine::id`]): people, not only installs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
     pub app: String,
     pub version: String,
     pub day: String,
@@ -130,6 +139,9 @@ pub struct Report {
     /// What failed and why, scrubbed on this computer; left out of the report when nothing failed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub failures: Vec<Failure>,
+    /// The studio's API routes used, by template; left out when none was.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub routes: std::collections::BTreeMap<String, state::RouteUse>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -179,6 +191,7 @@ impl Hub {
         };
         let path = config.data_dir.join("studio-hub.json");
         let mut state = State::load(&path)?;
+        neighbors::register(&config.app, &config.version, &config.data_dir);
         let disabled_by_env = env_on("DO_NOT_TRACK") || env_off("STUDIO_TELEMETRY");
         if disabled_by_env {
             state.install = None;
@@ -188,9 +201,20 @@ impl Hub {
         if state.first_seen == 0 {
             state.first_seen = now_secs();
         }
+        state.bucket_seed.get_or_insert_with(|| uuid::Uuid::new_v4().to_string());
         let ui_lang = Mutex::new(config.ui_lang.clone());
         let hub = Hub {
-            inner: Arc::new(Inner { config, urls, test: env_on("STUDIO_HUB_TEST"), disabled_by_env, path, state: Mutex::new(state), ui_lang, report_soon: tokio::sync::Notify::new() }),
+            inner: Arc::new(Inner {
+                config,
+                urls,
+                test: env_on("STUDIO_HUB_TEST"),
+                disabled_by_env,
+                path,
+                state: Mutex::new(state),
+                ui_lang,
+                report_soon: tokio::sync::Notify::new(),
+                machine: std::sync::OnceLock::new(),
+            }),
         };
         hub.persist(&hub.lock());
         Ok(hub)
@@ -350,6 +374,56 @@ impl Hub {
         self.inner.report_soon.notify_one();
     }
 
+    /// The models got ready (a download finished): the step between installing and the first result in the hub's
+    /// weekly install report.
+    pub fn setup_ready(&self) {
+        self.count("setup_ready", 1);
+    }
+
+    /// A model download failed: counted for the install report and kept with its reason, which is scrubbed here.
+    pub fn setup_failed(&self, reason: &str) {
+        self.count("setup_failed", 1);
+        self.failed("setup", reason);
+    }
+
+    /// Seconds of result (`kind` song, analyze...) made in `work`, for the hub's speed by card class. Only work that
+    /// had the engine to itself measures the card: time spent waiting behind another job would read as a slow card.
+    pub fn worked(&self, kind: &str, result_seconds: f64, work: Duration) {
+        if result_seconds <= 0.0 || !result_seconds.is_finite() {
+            return;
+        }
+        self.count(&format!("{kind}_media_s"), result_seconds.round() as u64);
+        self.count(&format!("{kind}_work_s"), work.as_secs_f64().round().max(1.0) as u64);
+    }
+
+    /// A call to the studio's own API, by its route template; [`Hub::track`] records every call by itself. Kept in
+    /// memory and written with the next save, so a window polling every second costs no disk writes. A call does not
+    /// make the day one to report: the routes go along with a day that counted something, so a launch where the
+    /// window only polled stays out of the active installs as before.
+    pub fn used_route(&self, method: &str, route: &str, failed: bool) {
+        let Some(key) = route_key(method, route) else { return };
+        if !self.telemetry_on() {
+            return;
+        }
+        let mut s = self.lock();
+        let day = s.days.entry(today()).or_default();
+        if day.routes.len() >= MAX_ROUTES && !day.routes.contains_key(&key) {
+            return;
+        }
+        let used = day.routes.entry(key).or_default();
+        used.calls += 1;
+        if failed {
+            used.errors += 1;
+        }
+    }
+
+    /// The studio's router with every call to its API counted by route template, as the features people use: a
+    /// studio adds this once, after its last route, and a new screen or action is counted without more code. The
+    /// hub's own routes, the fallback (static files) and wildcard routes are left out.
+    pub fn track<S: Clone + Send + Sync + 'static>(&self, router: axum::Router<S>) -> axum::Router<S> {
+        router.layer(axum::middleware::from_fn_with_state(self.clone(), routes::count_route))
+    }
+
     /// The frontend showed, clicked or closed a notice: remembered always (so it is not shown twice), counted only
     /// with telemetry on.
     pub fn notice(&self, id: &str, event: NoticeEvent) {
@@ -362,7 +436,7 @@ impl Hub {
         self.change(|s| {
             let at = now_secs();
             let session = s.sessions;
-            let popup = s.feed.as_ref().is_some_and(|f| f.feed.items.iter().any(|i| i.id == id && i.kind == "popup"));
+            let popup = s.feed.as_ref().is_some_and(|f| f.feed.items.iter().chain(&f.feed.variants).any(|i| i.id == id && i.kind == "popup"));
             let seen = s.seen.entry(id.to_string()).or_default();
             match event {
                 NoticeEvent::Shown => {
@@ -410,10 +484,12 @@ impl Hub {
         let who = Audience { version: &self.inner.config.version, platform: platform(), lang: &lang, test: self.inner.test, now: &now };
         let at = now_secs();
         let popup_room = state.last_popup_at.is_none_or(|last| at - last >= POPUP_GAP);
+        let seed = state.bucket_seed.clone().unwrap_or_default();
         let mut items: Vec<(FeedItem, NoticeMemory, bool)> = cached
             .feed
             .items
             .iter()
+            .chain(feed::chosen_variants(&cached.feed.variants, &seed))
             .filter(|item| feed::fits(item, &who))
             .map(|item| {
                 let seen = state.seen.get(&item.id).cloned().unwrap_or_default();
@@ -467,7 +543,7 @@ impl Hub {
                         match fresh {
                             Some((tag, feed)) => {
                                 // what the user did with a notice that left the feed is no longer needed
-                                s.seen.retain(|id, _| feed.items.iter().any(|item| item.id == *id));
+                                s.seen.retain(|id, _| feed.items.iter().chain(&feed.variants).any(|item| item.id == *id));
                                 s.feed = Some(CachedFeed { etag: tag, feed, source: url.clone(), fetched_at: now_secs() });
                             }
                             None => {
@@ -500,6 +576,7 @@ impl Hub {
         Some(Report {
             schema: 1,
             install,
+            machine: self.inner.machine.get_or_init(machine::id).clone(),
             app: self.inner.config.app.clone(),
             version: self.inner.config.version.clone(),
             day: day.to_string(),
@@ -515,6 +592,7 @@ impl Hub {
                 .iter()
                 .filter_map(|(key, count)| key.split_once('\t').map(|(kind, reason)| Failure { kind: kind.into(), reason: reason.into(), count: *count }))
                 .collect(),
+            routes: d.routes.clone(),
         })
     }
 
@@ -527,6 +605,8 @@ impl Hub {
         let days: Vec<String> = {
             let mut s = self.lock();
             s.prune(&today(), &oldest);
+            // route counts are kept in memory as calls come and reach the disk here
+            self.persist(&s);
             s.days.iter().filter(|(_, d)| d.dirty).map(|(day, _)| day.clone()).collect()
         };
         for day in days {
@@ -592,6 +672,11 @@ impl Hub {
         });
     }
 
+    /// The other programs of timoncool's on this computer and their data folders, to take models from.
+    pub fn neighbors(&self) -> Vec<neighbors::Neighbor> {
+        neighbors::others(&self.inner.config.data_dir)
+    }
+
     /// The axum routes the studio's frontend talks to, under `/v1/hub`.
     pub fn router<S: Clone + Send + Sync + 'static>(&self) -> axum::Router<S> {
         routes::router(self.clone())
@@ -617,6 +702,23 @@ impl Hub {
 
 #[cfg(test)]
 mod tests;
+
+/// `METHOD /route/{param}` as the hub takes it, for a route worth counting: not the hub's own, not the MCP transport
+/// (an agent's tools reach the studio's routes, which count), not a wildcard.
+fn route_key(method: &str, route: &str) -> Option<String> {
+    let method = match method {
+        "GET" | "POST" | "PUT" | "PATCH" | "DELETE" => method,
+        _ => return None,
+    };
+    let fits = route.starts_with('/')
+        && route.len() <= 120
+        && !route.starts_with("/v1/hub/")
+        && route != "/mcp"
+        && !route.starts_with("/mcp/")
+        && !route.contains('*')
+        && route.chars().all(|c| c.is_ascii_alphanumeric() || "_./{}:-".contains(c));
+    fits.then(|| format!("{method} {route}"))
+}
 
 /// A counter or failure kind as the hub takes it: `[a-z][a-z0-9_]{0,31}`.
 fn counter_name(name: &str) -> bool {

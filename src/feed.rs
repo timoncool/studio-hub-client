@@ -11,6 +11,10 @@ pub struct Feed {
     pub app: String,
     pub generated: String,
     pub items: Vec<FeedItem>,
+    /// The variants of running experiments, apart from `items` so a client that predates experiments shows none of
+    /// them instead of all at once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variants: Vec<FeedItem>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -132,6 +136,62 @@ pub struct FeedItem {
     #[serde(default)]
     pub tags: Vec<String>,
     pub content: BTreeMap<String, Content>,
+    /// One variant of an A/B test: each install sees exactly one variant of an experiment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experiment: Option<Experiment>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct Experiment {
+    pub id: String,
+    /// The variant's share against the other variants' weights.
+    pub weight: u32,
+}
+
+/// A bucket in `0..10000`, the same for the same seed and experiment every time and unrelated between experiments.
+/// FNV-1a over `seed:experiment`, then MurmurHash3's finaliser so nearby inputs spread evenly; the hub's embed
+/// (`embed/notices.ts`) computes the same.
+pub fn bucket(seed: &str, experiment: &str) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for byte in seed.bytes().chain(std::iter::once(b':')).chain(experiment.bytes()) {
+        h ^= byte as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x85eb_ca6b);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0xc2b2_ae35);
+    h ^= h >> 16;
+    h % 10_000
+}
+
+/// The variants this install sees: one per experiment, picked by weight from the experiment's bucket. Every variant
+/// in the feed takes part in the draw, so an install keeps its variant whatever else it fits.
+pub fn chosen_variants<'a>(variants: &'a [FeedItem], seed: &str) -> Vec<&'a FeedItem> {
+    let mut experiments: Vec<&str> = variants.iter().filter_map(|v| v.experiment.as_ref().map(|e| e.id.as_str())).collect();
+    experiments.sort_unstable();
+    experiments.dedup();
+    experiments
+        .into_iter()
+        .filter_map(|id| {
+            let mut arms: Vec<&FeedItem> = variants.iter().filter(|v| v.experiment.as_ref().is_some_and(|e| e.id == id && e.weight > 0)).collect();
+            arms.sort_by_key(|v| v.id.clone());
+            let total: u64 = arms.iter().map(|v| v.experiment.as_ref().map_or(0, |e| e.weight as u64)).sum();
+            if total == 0 {
+                return None;
+            }
+            let mut point = bucket(seed, id) as u64 * total / 10_000;
+            arms.into_iter().find(|v| {
+                let weight = v.experiment.as_ref().map_or(0, |e| e.weight as u64);
+                if point < weight {
+                    true
+                } else {
+                    point -= weight;
+                    false
+                }
+            })
+        })
+        .collect()
 }
 
 impl FeedItem {
@@ -254,6 +314,27 @@ mod tests {
         rules.audience = "new".into();
         assert!(!eligible(&rules, &NoticeMemory::default(), 3, old, now));
         assert!(eligible(&rules, &NoticeMemory::default(), 1, now - 2 * 24 * h, now));
+    }
+
+    #[test]
+    fn an_install_keeps_one_variant_and_the_weights_hold() {
+        assert_eq!(bucket("seed", "donate"), bucket("seed", "donate"));
+        assert_eq!(bucket("0f7d1c3e-4b8a-4f2e-9d6c-1a2b3c4d5e6f", "donate-text"), 4774);
+        assert_eq!(bucket("a", "b"), 9259);
+        let arm = |id: &str, weight: u32| item(serde_json::json!({"id": id, "experiment": {"id": "donate", "weight": weight}}));
+        let variants = vec![arm("donate-b", 1), arm("donate-a", 1), arm("donate-c", 2)];
+        let mut seen = std::collections::BTreeMap::<String, u32>::new();
+        for n in 0..8000 {
+            let chosen = chosen_variants(&variants, &format!("install-{n}"));
+            assert_eq!(chosen.len(), 1);
+            *seen.entry(chosen[0].id.clone()).or_default() += 1;
+        }
+        for (id, share) in [("donate-a", 2000.0), ("donate-b", 2000.0), ("donate-c", 4000.0)] {
+            let got = seen[id] as f64;
+            assert!((got - share).abs() < share * 0.08, "{id}: {got} of 8000");
+        }
+        let other = item(serde_json::json!({"id": "other", "experiment": {"id": "popup-style", "weight": 1}}));
+        assert_eq!(chosen_variants(&[variants[0].clone(), other], "x").len(), 2, "one variant per experiment");
     }
 
     #[test]

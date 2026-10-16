@@ -1,4 +1,5 @@
-use axum::extract::{Path, Query, State};
+use axum::extract::{MatchedPath, Path, Query, Request, State};
+use axum::middleware::Next;
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -143,4 +144,21 @@ async fn media(State(hub): State<Hub>, Path(key): Path<String>) -> Response {
 async fn flush(State(hub): State<Hub>) -> Json<serde_json::Value> {
     hub.flush(std::time::Duration::from_secs(8)).await;
     Json(json!({ "ok": true }))
+}
+
+/// A call the window makes by itself (`x-hub-skip: 1`), such as telling the server its language at start, is no feature.
+pub const SKIP_HEADER: &str = "x-hub-skip";
+
+/// Counts a call by the route it matched; a request no route matched (static files, the fallback) has none.
+pub(crate) async fn count_route(State(hub): State<Hub>, request: Request, next: Next) -> Response {
+    let skipped = request.headers().contains_key(SKIP_HEADER);
+    let route = request.extensions().get::<MatchedPath>().map(|path| path.as_str().to_owned()).filter(|_| !skipped);
+    let method = request.method().as_str().to_owned();
+    let response = next.run(request).await;
+    if let Some(route) = route {
+        // a 404 is a window asking about something already gone (a finished job), not a feature failing
+        let status = response.status();
+        hub.used_route(&method, &route, status.is_server_error() || (status.is_client_error() && status != StatusCode::NOT_FOUND));
+    }
+    response
 }

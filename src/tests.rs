@@ -73,8 +73,16 @@ async fn dead() -> String {
     format!("http://{addr}")
 }
 
-fn make_hub(dir: &std::path::Path, urls: Vec<String>) -> Hub {
-    Hub::new(HubConfig {
+/// The programs' shared folder of the tests, so they never write into the real one of this user.
+fn isolate_shared_dir() {
+    static SHARED: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    let dir = SHARED.get_or_init(|| tempfile::tempdir().unwrap());
+    std::env::set_var("TIMONCOOL_SHARED_DIR", dir.path());
+}
+
+fn config_for(dir: &std::path::Path) -> HubConfig {
+    isolate_shared_dir();
+    HubConfig {
         app: "yue2".into(),
         version: "3.5.0".into(),
         data_dir: dir.to_path_buf(),
@@ -82,9 +90,12 @@ fn make_hub(dir: &std::path::Path, urls: Vec<String>) -> Hub {
         os_label: "windows 11".into(),
         gpu: Gpu { vendor: "nvidia".into(), vram_gb: Gpu::vram_bucket(24 * 1_073_741_824), backend: "cuda".into() },
         ui_lang: "ru".into(),
-        urls,
-    })
-    .unwrap()
+        urls: Vec::new(),
+    }
+}
+
+fn make_hub(dir: &std::path::Path, urls: Vec<String>) -> Hub {
+    Hub::new(HubConfig { urls, ..config_for(dir) }).unwrap()
 }
 
 #[tokio::test]
@@ -252,4 +263,131 @@ async fn a_closing_studio_sends_its_day() {
     hub.count("songs", 1);
     hub.flush(std::time::Duration::from_secs(5)).await;
     assert_eq!(mock.reports.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn every_call_to_the_studios_api_is_counted_by_its_route_and_nothing_else() {
+    use tower::ServiceExt;
+    let dir = tempfile::tempdir().unwrap();
+    let hub = make_hub(dir.path(), vec![dead().await]);
+    let app: Router = hub.track(
+        Router::new()
+            .route("/api/songs/{id}/stems", post(|| async { "ok" }))
+            .route("/api/songs", get(|| async { "ok" }))
+            .route("/api/broken", post(|| async { StatusCode::INTERNAL_SERVER_ERROR }))
+            .route("/api/jobs/{id}", get(|| async { StatusCode::NOT_FOUND }))
+            .route("/mcp", post(|| async { "ok" }))
+            .route("/files/{*rest}", get(|| async { "file" }))
+            .merge(hub.router()),
+    );
+    let call = |method: &str, uri: &str| axum::http::Request::builder().method(method).uri(uri).body(axum::body::Body::empty()).unwrap();
+    app.clone().oneshot(call("GET", "/api/songs")).await.unwrap();
+    hub.acknowledge(true);
+    for uri in ["/api/songs/a1/stems", "/api/songs/b2/stems"] {
+        app.clone().oneshot(call("POST", uri)).await.unwrap();
+    }
+    app.clone().oneshot(call("GET", "/api/songs")).await.unwrap();
+    app.clone().oneshot(call("POST", "/api/broken")).await.unwrap();
+    app.clone().oneshot(call("GET", "/files/a/b.js")).await.unwrap();
+    app.clone().oneshot(call("GET", "/v1/hub/state")).await.unwrap();
+    app.clone().oneshot(call("GET", "/nowhere")).await.unwrap();
+    app.clone().oneshot(call("GET", "/api/jobs/gone")).await.unwrap();
+    app.clone().oneshot(call("POST", "/mcp")).await.unwrap();
+    let by_itself = axum::http::Request::builder().method("POST").uri("/api/songs/c3/stems").header(crate::routes::SKIP_HEADER, "1").body(axum::body::Body::empty()).unwrap();
+    app.clone().oneshot(by_itself).await.unwrap();
+    let routes = hub.report_for(&today()).unwrap().routes;
+    let seen: Vec<(&str, u64, u64)> = routes.iter().map(|(k, v)| (k.as_str(), v.calls, v.errors)).collect();
+    assert_eq!(
+        seen,
+        [("GET /api/jobs/{id}", 1, 0), ("GET /api/songs", 1, 0), ("POST /api/broken", 1, 1), ("POST /api/songs/{id}/stems", 2, 0)],
+        "templates, not ids; the call before the choice, the MCP transport, the hub's own routes and a call the window makes by itself are not counted; a 404 is no error"
+    );
+    assert!(!hub.lock().days[&today()].dirty, "calls alone do not make a day to report");
+
+    hub.send_reports().await;
+    let again = make_hub(dir.path(), vec![dead().await]);
+    assert_eq!(again.lock().days[&today()].routes.len(), 4, "the counts reached the disk with the report turn, sent or not");
+}
+
+#[tokio::test]
+async fn an_install_sees_one_variant_of_an_experiment_and_old_feeds_still_parse() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = make_hub(dir.path(), vec![dead().await]);
+    let mut body = feed();
+    let arm = |id: &str| {
+        let mut v = body["items"][0].clone();
+        v["id"] = serde_json::json!(id);
+        v["experiment"] = serde_json::json!({"id": "donate", "weight": 1});
+        v
+    };
+    body["variants"] = serde_json::json!([arm("donate-a"), arm("donate-b")]);
+    let parsed: Feed = serde_json::from_value(body).unwrap();
+    hub.change(|s| s.feed = Some(CachedFeed { etag: None, feed: parsed, source: "x".into(), fetched_at: now_secs() }));
+    let ids: Vec<String> = hub.items().into_iter().map(|(i, _, _)| i.id).collect();
+    let variants: Vec<&String> = ids.iter().filter(|id| id.starts_with("donate-")).collect();
+    assert_eq!(variants.len(), 1, "{ids:?}");
+    let first = variants[0].clone();
+    let again = make_hub(dir.path(), vec![dead().await]);
+    assert!(again.items().iter().any(|(i, _, _)| i.id == first), "the same variant after a restart");
+
+    let old: Feed = serde_json::from_value(feed()).unwrap();
+    assert!(old.variants.is_empty());
+}
+
+#[tokio::test]
+async fn setup_and_speed_use_the_names_the_hub_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = make_hub(dir.path(), vec![dead().await]);
+    hub.acknowledge(true);
+    hub.setup_ready();
+    hub.setup_failed("GET https://huggingface.co/x timed out");
+    hub.worked("song", 144.9, Duration::from_secs(1460));
+    hub.worked("song", 0.0, Duration::from_secs(5));
+    let report = hub.report_for(&today()).unwrap();
+    assert_eq!(report.counts.get("setup_ready"), Some(&1));
+    assert_eq!(report.counts.get("setup_failed"), Some(&1));
+    assert_eq!((report.counts.get("song_media_s"), report.counts.get("song_work_s")), (Some(&145), Some(&1460)));
+    assert_eq!(report.failures[0].kind, "setup");
+    assert_eq!(report.failures[0].reason, "GET <url> timed out");
+}
+
+#[tokio::test]
+async fn each_program_finds_the_others_and_not_itself() {
+    let (yue2, dub) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let first = make_hub(yue2.path(), vec![dead().await]);
+    let second = Hub::new(HubConfig { app: "dub".into(), ..config_for(dub.path()) }).unwrap();
+    assert!(first.neighbors().iter().any(|n| n.app == "dub" && n.data_dir == dub.path()));
+    assert!(second.neighbors().iter().any(|n| n.app == "yue2" && n.data_dir == yue2.path()));
+    assert!(!first.neighbors().iter().any(|n| n.data_dir == yue2.path()), "not itself");
+    let gone = dub.path().to_path_buf();
+    drop(dub);
+    assert!(!first.neighbors().iter().any(|n| n.data_dir == gone), "a program whose folder is gone is no neighbour");
+}
+
+#[tokio::test]
+async fn a_neighbours_model_is_taken_through_a_staged_name_and_left_alone_when_the_check_fails() {
+    let (own, other) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let _first = make_hub(own.path(), vec![dead().await]);
+    let _second = Hub::new(HubConfig { app: "dub".into(), ..config_for(other.path()) }).unwrap();
+    let source = other.path().join("models").join("whisper").join("model.bin");
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+    std::fs::write(&source, vec![1u8; 4096]).unwrap();
+    let in_a_project = other.path().join("workspace").join("p1").join("take.bin");
+    std::fs::create_dir_all(in_a_project.parent().unwrap()).unwrap();
+    std::fs::write(&in_a_project, vec![1u8; 4096]).unwrap();
+
+    // the walk is cached for a minute: the neighbour above was registered before the first look
+    let (found, app) = neighbors::find_file(std::ffi::OsStr::new("model.bin"), 4096, Some(std::ffi::OsStr::new("whisper"))).expect("found by name, size and folder");
+    assert_eq!((found.as_path(), app.as_str()), (source.as_path(), "dub"));
+    assert!(neighbors::find_file(std::ffi::OsStr::new("model.bin"), 4095, None).is_none(), "a size off by one is another file");
+    assert!(neighbors::find_file(std::ffi::OsStr::new("model.bin"), 4096, Some(std::ffi::OsStr::new("whisper-turbo"))).is_none(), "the same file of another model folder is not taken without a checksum");
+    assert!(neighbors::find_file(std::ffi::OsStr::new("take.bin"), 4096, None).is_none(), "a program's projects are not searched for models");
+
+    let target = own.path().join("karaoke").join("model.bin");
+    assert!(neighbors::take_file(&found, &target, false, |_| false).is_err());
+    assert!(!target.exists() && !PathBuf::from(format!("{}.neighbor", target.display())).exists(), "nothing stays behind a failed check");
+    assert!(neighbors::find_file(std::ffi::OsStr::new("model.bin"), 4096, None).is_none(), "a file that failed the check is not offered again");
+    neighbors::take_file(&found, &target, false, |staged| std::fs::metadata(staged).is_ok_and(|m| m.len() == 4096)).unwrap();
+    std::fs::write(&source, vec![2u8; 4096]).unwrap();
+    assert_eq!(std::fs::read(&target).unwrap()[0], 2, "a hard link: one file on disk");
 }
