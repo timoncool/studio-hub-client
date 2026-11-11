@@ -557,6 +557,19 @@ mod tests {
         assert!(ask(AskMemory { ask_dismissals: 1, last_ask_dismissed: Some(now - day), ..a.clone() }, &f, false));
         assert!(ask(a.clone(), &Facts { running: true, ..f.clone() }, true));
         assert!(!ask_ok(&journey, "install-1", &f, &a, true, 3, now));
+
+        // the default limits, as the hub's DEFAULT_JOURNEY (studio-hub 7d71c34)
+        let d = Journey::default();
+        assert_eq!((d.ask_gap_h, d.ask_gap_sessions, d.quiet_after, d.quiet_days, d.holdout_pct), (720, 2, 2, 3650, 10));
+        let ask = |asks: AskMemory| ask_ok(&d, seed, &f, &asks, false, 3, now);
+        assert!(!ask(AskMemory { last_ask: Some(now - 719 * h), last_ask_session: Some(1), ..a.clone() }));
+        assert!(!ask(AskMemory { last_ask: Some(now - 720 * h), last_ask_session: Some(2), ..a.clone() }));
+        assert!(ask(AskMemory { last_ask: Some(now - 720 * h), last_ask_session: Some(1), ..a.clone() }));
+        let closed = AskMemory { last_ask: Some(now - 40 * day), ask_dismissals: 2, ..a.clone() };
+        assert!(!ask(AskMemory { last_ask_dismissed: Some(now - 30 * day), ..closed.clone() }));
+        assert!(!ask(AskMemory { last_ask_dismissed: Some(now - 3649 * day), ..closed.clone() }));
+        assert!(ask(AskMemory { last_ask_dismissed: Some(now - 3650 * day), ..closed }));
+        assert!(ask(AskMemory { ask_dismissals: 1, last_ask_dismissed: Some(now - day), ..a.clone() }));
     }
 
     fn who() -> Audience<'static> {
