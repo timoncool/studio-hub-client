@@ -115,6 +115,13 @@ struct Inner {
     report_soon: tokio::sync::Notify,
     /// Worked out with the first report, so nothing of it (not even the shared fallback file) exists before consent.
     machine: std::sync::OnceLock<Option<String>>,
+    /// This launch is in today's counters (`launch`): a day of a launch is reported whatever the window showed.
+    launch_counted: std::sync::atomic::AtomicBool,
+    /// The journey's facts of this launch: work done, the last task's failure, tasks running, the control group counted.
+    session_done: std::sync::atomic::AtomicU64,
+    last_failure: Mutex<Option<(String, String)>>,
+    running: std::sync::atomic::AtomicU32,
+    holdout_counted: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -201,6 +208,11 @@ impl Hub {
         if state.first_seen == 0 {
             state.first_seen = now_secs();
         }
+        state.previous_launch = state.launch_at.replace(now_secs());
+        if state.last_active_day.as_deref() != Some(today().as_str()) {
+            state.active_days += 1;
+            state.last_active_day = Some(today());
+        }
         state.bucket_seed.get_or_insert_with(|| uuid::Uuid::new_v4().to_string());
         let ui_lang = Mutex::new(config.ui_lang.clone());
         let hub = Hub {
@@ -214,9 +226,15 @@ impl Hub {
                 ui_lang,
                 report_soon: tokio::sync::Notify::new(),
                 machine: std::sync::OnceLock::new(),
+                launch_counted: std::sync::atomic::AtomicBool::new(false),
+                session_done: std::sync::atomic::AtomicU64::new(0),
+                last_failure: Mutex::new(None),
+                running: std::sync::atomic::AtomicU32::new(0),
+                holdout_counted: std::sync::atomic::AtomicBool::new(false),
             }),
         };
         hub.persist(&hub.lock());
+        hub.count_launch();
         Ok(hub)
     }
 
@@ -240,7 +258,37 @@ impl Hub {
     /// environment turned it off.
     pub fn telemetry_on(&self) -> bool {
         let state = self.lock();
+        self.telemetry_on_with(&state)
+    }
+
+    fn telemetry_on_with(&self, state: &State) -> bool {
         !self.inner.disabled_by_env && state.acknowledged && state.telemetry.unwrap_or(true)
+    }
+
+    /// A task started (`true`) or ended (`false`): a request is not shown while one runs.
+    pub fn task_running(&self, on: bool) {
+        use std::sync::atomic::Ordering;
+        if on {
+            self.inner.running.fetch_add(1, Ordering::SeqCst);
+        } else {
+            let _ = self.inner.running.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| Some(n.saturating_sub(1)));
+        }
+    }
+
+    /// What the journey knows of this install now.
+    fn facts(&self, state: &State) -> feed::Facts {
+        use std::sync::atomic::Ordering;
+        feed::Facts {
+            done: state.totals.iter().filter(|(name, _)| name.ends_with("_done")).map(|(_, n)| *n).sum(),
+            session_done: self.inner.session_done.load(Ordering::SeqCst),
+            active_days: state.active_days,
+            previous_launch: state.previous_launch,
+            last_failure: self.inner.last_failure.lock().unwrap_or_else(|p| p.into_inner()).clone(),
+            running: self.inner.running.load(Ordering::SeqCst) > 0,
+            counts: state.totals.clone(),
+            routes: state.routes_used.clone(),
+            installed: neighbors::others(&self.inner.config.data_dir).into_iter().map(|n| n.app).collect(),
+        }
     }
 
     /// The window language as the hub takes it, two ASCII letters; anything else keeps the previous one.
@@ -262,6 +310,7 @@ impl Hub {
             s.telemetry = Some(enabled);
             Self::fit_install(s, enabled);
         });
+        self.count_launch();
     }
 
     pub fn set_telemetry(&self, enabled: bool) {
@@ -269,6 +318,15 @@ impl Hub {
             s.telemetry = Some(enabled);
             Self::fit_install(s, enabled);
         });
+        self.count_launch();
+    }
+
+    /// `launch` once a launch, as soon as telemetry is on in it.
+    fn count_launch(&self) {
+        use std::sync::atomic::Ordering;
+        if self.telemetry_on() && !self.inner.launch_counted.swap(true, Ordering::SeqCst) {
+            self.count("launch", 1);
+        }
     }
 
     fn fit_install(s: &mut State, enabled: bool) {
@@ -296,6 +354,12 @@ impl Hub {
             tracing::warn!("studio hub: counter name {name:?} is not [a-z][a-z0-9_]{{0,31}}, not counted");
             return;
         }
+        // the journey's facts are the install's own and stay local, so they are kept whatever the telemetry choice
+        if name.ends_with("_done") {
+            self.inner.session_done.fetch_add(n, std::sync::atomic::Ordering::SeqCst);
+            *self.inner.last_failure.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        }
+        self.change(|s| *s.totals.entry(name.to_string()).or_default() += n);
         if !self.telemetry_on() {
             return;
         }
@@ -359,10 +423,15 @@ impl Hub {
     /// Something failed (`kind`: song, analyze, render, ...): counted with its reason, which is scrubbed here, before it
     /// is stored, so nothing about the person is kept or sent. Up to 20 different reasons a day.
     pub fn failed(&self, kind: &str, reason: &str) {
-        if !self.telemetry_on() || !counter_name(kind) {
+        if !counter_name(kind) {
             return;
         }
         let reason = scrub::reason(reason);
+        // the journey's fact: the last task of this launch failed, and why
+        *self.inner.last_failure.lock().unwrap_or_else(|p| p.into_inner()) = Some((kind.to_string(), reason.clone()));
+        if !self.telemetry_on() {
+            return;
+        }
         let key = format!("{kind}\t{}", if reason.is_empty() { "unknown" } else { reason.as_str() });
         self.change(|s| {
             let day = s.days.entry(today()).or_default();
@@ -402,10 +471,13 @@ impl Hub {
     /// window only polled stays out of the active installs as before.
     pub fn used_route(&self, method: &str, route: &str, failed: bool) {
         let Some(key) = route_key(method, route) else { return };
-        if !self.telemetry_on() {
+        let mut s = self.lock();
+        if !s.routes_used.contains(&key) {
+            s.routes_used.insert(key.clone());
+        }
+        if !self.telemetry_on_with(&s) {
             return;
         }
-        let mut s = self.lock();
         let day = s.days.entry(today()).or_default();
         if day.routes.len() >= MAX_ROUTES && !day.routes.contains_key(&key) {
             return;
@@ -430,13 +502,16 @@ impl Hub {
         self.notice_on(id, event, None);
     }
 
-    /// As [`Hub::notice`], a click naming what was clicked: `b0`, `b1`... for the buttons in order, `link` for a link.
+    /// As [`Hub::notice`], a click naming what was clicked: `b0`, `b1`... for the buttons in order, `l0`, `l1`... for the
+    /// links of the text in order, `link` for a link of an older window.
     pub fn notice_on(&self, id: &str, event: NoticeEvent, button: Option<&str>) {
         let counting = self.telemetry_on();
         self.change(|s| {
             let at = now_secs();
             let session = s.sessions;
-            let popup = s.feed.as_ref().is_some_and(|f| f.feed.items.iter().chain(&f.feed.variants).any(|i| i.id == id && i.kind == "popup"));
+            let item = s.feed.as_ref().and_then(|f| f.feed.items.iter().chain(&f.feed.variants).find(|i| i.id == id).cloned());
+            let popup = item.as_ref().is_some_and(|i| i.kind == "popup");
+            let ask = item.as_ref().is_some_and(|i| i.rules.class.as_deref() == Some("ask"));
             let seen = s.seen.entry(id.to_string()).or_default();
             match event {
                 NoticeEvent::Shown => {
@@ -449,9 +524,24 @@ impl Hub {
                     if popup {
                         s.last_popup_at = Some(at);
                     }
+                    if ask {
+                        s.asks.last_ask = Some(at);
+                        s.asks.last_ask_session = Some(session);
+                    }
                 }
-                NoticeEvent::Clicked => seen.clicked_at = Some(at),
-                NoticeEvent::Dismissed => seen.dismissed_at = Some(at),
+                NoticeEvent::Clicked => {
+                    seen.clicked_at = Some(at);
+                    if ask {
+                        s.asks.ask_dismissals = 0;
+                    }
+                }
+                NoticeEvent::Dismissed => {
+                    seen.dismissed_at = Some(at);
+                    if ask {
+                        s.asks.ask_dismissals += 1;
+                        s.asks.last_ask_dismissed = Some(at);
+                    }
+                }
             }
             if counting {
                 let day = s.days.entry(today()).or_default();
@@ -461,7 +551,7 @@ impl Hub {
                         NoticeEvent::Shown => c.shown += 1,
                         NoticeEvent::Clicked => {
                             c.clicked += 1;
-                            let named = button.filter(|button| *button == "link" || (button.len() <= 3 && button.len() > 1 && button.starts_with('b') && button[1..].chars().all(|c| c.is_ascii_digit())));
+                            let named = button.filter(|button| click_name(button));
                             if let Some(button) = named.filter(|button| c.buttons.len() < MAX_BUTTONS || c.buttons.contains_key(*button)) {
                                 *c.buttons.entry(button.to_string()).or_default() += 1;
                             }
@@ -485,6 +575,8 @@ impl Hub {
         let at = now_secs();
         let popup_room = state.last_popup_at.is_none_or(|last| at - last >= POPUP_GAP);
         let seed = state.bucket_seed.clone().unwrap_or_default();
+        let facts = self.facts(&state);
+        let journey = &cached.feed.journey;
         let mut items: Vec<(FeedItem, NoticeMemory, bool)> = cached
             .feed
             .items
@@ -493,12 +585,31 @@ impl Hub {
             .filter(|item| feed::fits(item, &who))
             .map(|item| {
                 let seen = state.seen.get(&item.id).cloned().unwrap_or_default();
+                let shown_now = seen.shown_session == Some(state.sessions);
+                let ask = item.rules.class.as_deref() == Some("ask");
                 let ok = feed::eligible(&item.rules, &seen, state.sessions, state.first_seen, at)
-                    && (item.kind != "popup" || popup_room || seen.shown_session == Some(state.sessions));
+                    && feed::step_ok(&item.rules, &facts, &state.seen, state.first_seen, at)
+                    && (!ask || feed::ask_ok(journey, &seed, &facts, &state.asks, shown_now, state.sessions, at))
+                    && (item.kind != "popup" || popup_room || shown_now);
                 (item.clone(), seen, ok)
             })
             .collect();
-        items.sort_by(|a, b| b.0.priority.cmp(&a.0.priority));
+        // one request on screen: the one already shown in this launch, else the highest priority, then the lower id
+        let mut asks: Vec<usize> = (0..items.len()).filter(|&i| items[i].2 && items[i].0.rules.class.as_deref() == Some("ask")).collect();
+        asks.sort_by(|&a, &b| {
+            let now_a = items[a].1.shown_session == Some(state.sessions);
+            let now_b = items[b].1.shown_session == Some(state.sessions);
+            now_b.cmp(&now_a).then(items[b].0.priority.cmp(&items[a].0.priority)).then(items[a].0.id.cmp(&items[b].0.id))
+        });
+        for &i in asks.iter().skip(1) {
+            items[i].2 = false;
+        }
+        let holdout = feed::in_holdout(journey, &seed) && cached.feed.items.iter().any(|item| item.rules.class.as_deref() == Some("ask"));
+        drop(state);
+        if holdout && !self.inner.holdout_counted.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            self.count("journey_holdout", 1);
+        }
+        items.sort_by_key(|a| std::cmp::Reverse(a.0.priority));
         items
     }
 
@@ -542,8 +653,8 @@ impl Hub {
                     self.change(|s| {
                         match fresh {
                             Some((tag, feed)) => {
-                                // what the user did with a notice that left the feed is no longer needed
-                                s.seen.retain(|id, _| feed.items.iter().chain(&feed.variants).any(|item| item.id == *id));
+                                // what the user did with a notice is kept for good, also while it is out of the feed:
+                                // a notice paused and brought back, however much later, is not shown as new
                                 s.feed = Some(CachedFeed { etag: tag, feed, source: url.clone(), fetched_at: now_secs() });
                             }
                             None => {
@@ -718,6 +829,17 @@ fn route_key(method: &str, route: &str) -> Option<String> {
         && !route.contains('*')
         && route.chars().all(|c| c.is_ascii_alphanumeric() || "_./{}:-".contains(c));
     fits.then(|| format!("{method} {route}"))
+}
+
+/// What was clicked in a notice, as the hub takes it: `b<0-99>` its buttons in order, `u` and eight hex digits a link
+/// of its text by the FNV-1a hash of its address (the window computes it, so the name holds when links move), and the
+/// older `l<0-99>` and `link`.
+fn click_name(name: &str) -> bool {
+    let digits = |rest: &str| (1..=2).contains(&rest.len()) && rest.chars().all(|c| c.is_ascii_digit());
+    name == "link"
+        || name.strip_prefix('b').is_some_and(digits)
+        || name.strip_prefix('l').is_some_and(digits)
+        || name.strip_prefix('u').is_some_and(|hex| hex.len() == 8 && hex.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)))
 }
 
 /// A counter or failure kind as the hub takes it: `[a-z][a-z0-9_]{0,31}`.

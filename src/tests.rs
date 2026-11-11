@@ -10,6 +10,8 @@ use super::*;
 struct Mock {
     reports: Arc<Mutex<Vec<serde_json::Value>>>,
     feed_calls: Arc<Mutex<u32>>,
+    /// What the feed answers instead of `feed()`.
+    feed_body: Arc<Mutex<Option<serde_json::Value>>>,
 }
 
 const ETAG: &str = "\"abc\"";
@@ -41,7 +43,8 @@ async fn serve(mock: Mock) -> String {
                         if headers.get("if-none-match").and_then(|v| v.to_str().ok()) == Some(ETAG) {
                             return (StatusCode::NOT_MODIFIED, [("etag", ETAG)], Json(serde_json::Value::Null));
                         }
-                        (StatusCode::OK, [("etag", ETAG)], Json(feed()))
+                        let body = mock.feed_body.lock().unwrap().clone().unwrap_or_else(feed);
+                        (StatusCode::OK, [("etag", ETAG)], Json(body))
                     }
                 }
             }),
@@ -134,7 +137,8 @@ async fn nothing_is_counted_before_the_choice_and_the_id_lives_only_while_teleme
     hub.used_model("yue2-q8");
     let report = hub.report_for(&today()).unwrap();
     assert_eq!(report.counts.get("songs"), Some(&2));
-    assert_eq!(report.counts.len(), 1);
+    assert_eq!(report.counts.get("launch"), Some(&1), "the launch counts once the choice is made");
+    assert_eq!(report.counts.len(), 2);
     assert_eq!(report.models, ["yue2-q8"]);
     assert_eq!(report.gpu.vram_gb, "24+");
 
@@ -252,6 +256,79 @@ async fn a_click_says_which_button_or_link() {
     assert_eq!(promo.buttons.get("b1"), Some(&2));
     assert_eq!(promo.buttons.get("link"), Some(&1));
     assert_eq!(promo.buttons.len(), 2);
+    hub.notice_on("star", NoticeEvent::Clicked, Some("l0"));
+    hub.notice_on("star", NoticeEvent::Clicked, Some("l1"));
+    hub.notice_on("star", NoticeEvent::Clicked, Some("l1"));
+    let star = hub.report_for(&today()).unwrap().notices.get("star").cloned().unwrap();
+    assert_eq!((star.buttons.get("l0"), star.buttons.get("l1")), (Some(&1), Some(&2)), "the links of a text apart");
+    hub.notice_on("star", NoticeEvent::Clicked, Some("udad9bf80"));
+    hub.notice_on("star", NoticeEvent::Clicked, Some("uDAD9BF80"));
+    hub.notice_on("star", NoticeEvent::Clicked, Some("u12"));
+    let star = hub.report_for(&today()).unwrap().notices.get("star").cloned().unwrap();
+    assert_eq!(star.buttons.get("udad9bf80"), Some(&1), "a link by the hash of its address");
+    assert!(!star.buttons.contains_key("uDAD9BF80") && !star.buttons.contains_key("u12"), "only the hub's form is counted");
+}
+
+/// A notice that leaves the feed (paused) and comes back keeps what the person did with it, however long it was away.
+#[tokio::test]
+async fn a_paused_notice_keeps_its_shows_when_it_comes_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = make_hub(dir.path(), vec![dead().await]);
+    hub.change(|s| {
+        s.seen.insert("high".into(), crate::feed::NoticeMemory { shows: 7, dismissed_at: Some(1), ..Default::default() });
+    });
+    let mut paused = feed();
+    paused["items"] = serde_json::json!([paused["items"][0].clone()]);
+    let mock = Mock::default();
+    *mock.feed_body.lock().unwrap() = Some(paused);
+    let url = serve(mock.clone()).await;
+    let hub = make_hub(dir.path(), vec![url]);
+    hub.refresh().await.unwrap();
+    assert_eq!(hub.lock().seen["high"].shows, 7, "paused: still remembered");
+    *mock.feed_body.lock().unwrap() = None;
+    hub.change(|s| s.feed.as_mut().unwrap().etag = None);
+    hub.refresh().await.unwrap();
+    let back = hub.lock().seen["high"].clone();
+    assert_eq!((back.shows, back.dismissed_at), (7, Some(1)), "back in the feed with its shows and closing");
+}
+
+/// A request (`class: ask`) is one on screen, the journey's facts follow the work, and the control group is counted.
+#[tokio::test]
+async fn one_request_shows_and_the_steps_follow_the_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = make_hub(dir.path(), vec![dead().await]);
+    hub.acknowledge(true);
+    let mut body = feed();
+    let ask = |id: &str, priority: i32, extra: serde_json::Value| {
+        let mut v = body["items"][0].clone();
+        v["id"] = serde_json::json!(id);
+        v["priority"] = serde_json::json!(priority);
+        v["rules"]["class"] = serde_json::json!("ask");
+        for (k, x) in extra.as_object().unwrap() {
+            v["rules"][k] = x.clone();
+        }
+        v
+    };
+    body["items"] = serde_json::json!([ask("star", 5, serde_json::json!({"min_done": 1})), ask("donate", 9, serde_json::json!({"min_done": 5})), ask("share", 1, serde_json::json!({}))]);
+    body["journey"] = serde_json::json!({"ask_gap_h": 72, "ask_gap_sessions": 2, "quiet_after": 2, "quiet_days": 30, "holdout_pct": 0});
+    let parsed: Feed = serde_json::from_value(body).unwrap();
+    hub.change(|s| s.feed = Some(CachedFeed { etag: None, feed: parsed, source: "x".into(), fetched_at: now_secs() }));
+    let showing = |hub: &Hub| hub.items().into_iter().filter(|(_, _, ok)| *ok).map(|(i, _, _)| i.id).collect::<Vec<_>>();
+    assert_eq!(showing(&hub), ["share"], "no work yet: only the step without a condition");
+    hub.count("render_done", 1);
+    assert_eq!(showing(&hub), ["star"], "after the first work the higher priority of the two that pass");
+    hub.notice_on("star", NoticeEvent::Shown, None);
+    hub.count("render_done", 4);
+    assert_eq!(showing(&hub), ["star"], "the request shown in this launch stays, the higher one waits");
+    let (asked_in, sessions) = {
+        let s = hub.lock();
+        (s.asks.last_ask_session, s.sessions)
+    };
+    assert_eq!(asked_in, Some(sessions));
+    hub.failed("render", "out of memory");
+    assert_eq!(showing(&hub), ["star"], "a failure keeps away a new request, not the one on screen");
+    hub.notice_on("star", NoticeEvent::Dismissed, None);
+    assert_eq!(hub.lock().asks.ask_dismissals, 1);
 }
 
 #[tokio::test]
@@ -302,7 +379,8 @@ async fn every_call_to_the_studios_api_is_counted_by_its_route_and_nothing_else(
         [("GET /api/jobs/{id}", 1, 0), ("GET /api/songs", 1, 0), ("POST /api/broken", 1, 1), ("POST /api/songs/{id}/stems", 2, 0)],
         "templates, not ids; the call before the choice, the MCP transport, the hub's own routes and a call the window makes by itself are not counted; a 404 is no error"
     );
-    assert!(!hub.lock().days[&today()].dirty, "calls alone do not make a day to report");
+    let counts = hub.lock().days[&today()].counts.clone();
+    assert_eq!(counts.into_iter().collect::<Vec<_>>(), [("launch".to_string(), 1)], "calls add no counter; the launch is the day's");
 
     hub.send_reports().await;
     let again = make_hub(dir.path(), vec![dead().await]);
