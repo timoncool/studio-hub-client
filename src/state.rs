@@ -91,6 +91,22 @@ pub struct State {
     #[serde(default)]
     pub bucket_seed: Option<String>,
     pub days: BTreeMap<String, Day>,
+    /// The journey's facts, kept on this computer whatever the telemetry choice and never reported: counters and
+    /// route templates over the install's life, the days with a launch, the starts of this and the last launch.
+    #[serde(default)]
+    pub totals: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub routes_used: BTreeSet<String>,
+    #[serde(default)]
+    pub active_days: u32,
+    #[serde(default)]
+    pub last_active_day: Option<String>,
+    #[serde(default)]
+    pub launch_at: Option<i64>,
+    #[serde(default)]
+    pub previous_launch: Option<i64>,
+    #[serde(default)]
+    pub asks: crate::feed::AskMemory,
 }
 
 impl State {

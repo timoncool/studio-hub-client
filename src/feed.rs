@@ -15,6 +15,130 @@ pub struct Feed {
     /// them instead of all at once.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub variants: Vec<FeedItem>,
+    /// The limits of the program's journey for the requests (`class: ask`).
+    #[serde(default)]
+    pub journey: Journey,
+}
+
+/// How often a program may ask (studio-hub/src/shared/rules.ts, the same defaults).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct Journey {
+    pub ask_gap_h: u32,
+    pub ask_gap_sessions: u32,
+    pub quiet_after: u32,
+    pub quiet_days: u32,
+    pub holdout_pct: u32,
+}
+
+impl Default for Journey {
+    fn default() -> Self {
+        Journey { ask_gap_h: 72, ask_gap_sessions: 2, quiet_after: 2, quiet_days: 30, holdout_pct: 10 }
+    }
+}
+
+/// What the client knows of this install for the journey's conditions; local, never reported.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Facts {
+    /// Every `*_done` over the install's life.
+    pub done: u64,
+    /// `*_done` in this launch.
+    pub session_done: u64,
+    /// Days (UTC) with a launch, today included.
+    pub active_days: u32,
+    /// The start of the launch before this one, Unix seconds.
+    pub previous_launch: Option<i64>,
+    /// The last task of this launch, when it failed: its kind and its scrubbed reason.
+    pub last_failure: Option<(String, String)>,
+    /// A task is running now.
+    pub running: bool,
+    /// Counters over the install's life.
+    pub counts: BTreeMap<String, u64>,
+    /// Route templates the install has called.
+    pub routes: std::collections::BTreeSet<String>,
+    /// The author's programs on this computer.
+    pub installed: Vec<String>,
+}
+
+/// What the client remembers of its requests (`class: ask`), across launches.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct AskMemory {
+    pub last_ask: Option<i64>,
+    pub last_ask_session: Option<u32>,
+    pub ask_dismissals: u32,
+    pub last_ask_dismissed: Option<i64>,
+}
+
+/// Whether a step's conditions hold; they hold in every launch, the one that showed it too, so a step leaves the
+/// journey as soon as one fails (max_done, after_failure, not_installed). A condition without its fact fails.
+pub fn step_ok(rules: &Rules, facts: &Facts, seen: &BTreeMap<String, NoticeMemory>, first_seen: i64, now: i64) -> bool {
+    const DAY: i64 = 24 * 3600;
+    let at_least = |min: Option<u32>, have: u64| min.is_none_or(|min| have >= min as u64);
+    if !at_least(rules.min_done, facts.done) || rules.max_done.is_some_and(|max| facts.done > max as u64) {
+        return false;
+    }
+    if !at_least(rules.min_active_days, facts.active_days as u64) {
+        return false;
+    }
+    if rules.min_age_days.is_some_and(|days| now - first_seen < days as i64 * DAY) {
+        return false;
+    }
+    if rules.after_success && (facts.session_done == 0 || facts.last_failure.is_some()) {
+        return false;
+    }
+    if let Some(want) = &rules.after_failure {
+        let (kind, reason) = want.split_once(':').map_or((want.as_str(), ""), |(k, r)| (k, r));
+        if !facts.last_failure.as_ref().is_some_and(|(k, r)| k == kind && r.starts_with(reason)) {
+            return false;
+        }
+    }
+    if rules.after_event.as_ref().is_some_and(|event| facts.counts.get(event).copied().unwrap_or(0) == 0) {
+        return false;
+    }
+    if let Some(days) = rules.absent_days {
+        if !facts.previous_launch.is_some_and(|previous| now - previous >= days as i64 * DAY) {
+            return false;
+        }
+    }
+    if rules.unused_route.as_ref().is_some_and(|route| facts.routes.contains(route)) {
+        return false;
+    }
+    if rules.not_installed.as_ref().is_some_and(|apps| apps.iter().any(|app| facts.installed.contains(app))) {
+        return false;
+    }
+    if rules.shown_before.as_ref().is_some_and(|ids| ids.iter().any(|id| seen.get(id).is_none_or(|s| s.shows == 0))) {
+        return false;
+    }
+    true
+}
+
+/// Whether the journey lets a request (`class: ask`) show in this launch.
+pub fn ask_ok(journey: &Journey, seed: &str, facts: &Facts, asks: &AskMemory, shown_now: bool, sessions: u32, now: i64) -> bool {
+    const HOUR: i64 = 3600;
+    if in_holdout(journey, seed) {
+        return false;
+    }
+    if shown_now {
+        return true;
+    }
+    if facts.running || facts.last_failure.is_some() {
+        return false;
+    }
+    if asks.last_ask.is_some_and(|at| now - at < journey.ask_gap_h as i64 * HOUR) {
+        return false;
+    }
+    if asks.last_ask_session.is_some_and(|at| sessions.saturating_sub(at) < journey.ask_gap_sessions) {
+        return false;
+    }
+    if asks.ask_dismissals >= journey.quiet_after && asks.last_ask_dismissed.is_some_and(|at| now - at < journey.quiet_days as i64 * 24 * HOUR) {
+        return false;
+    }
+    true
+}
+
+/// The install is in the journey's control group: it sees the help, never a request.
+pub fn in_holdout(journey: &Journey, seed: &str) -> bool {
+    bucket(seed, "journey") < journey.holdout_pct * 100
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -70,7 +194,45 @@ pub struct Rules {
     /// all | new | returning
     pub audience: String,
     pub new_days: u32,
+    /// never | keep: whether a notice clicked once shows again in a later launch.
+    #[serde(default = "keep")]
+    pub after_click: String,
+    /// The journey's conditions of a step (studio-hub rules.ts): none set — a notice outside the journey.
+    #[serde(default)]
+    pub min_done: Option<u32>,
+    #[serde(default)]
+    pub max_done: Option<u32>,
+    #[serde(default)]
+    pub min_active_days: Option<u32>,
+    #[serde(default)]
+    pub min_age_days: Option<u32>,
+    #[serde(default)]
+    pub after_success: bool,
+    /// `kind` or `kind:start of the reason`.
+    #[serde(default)]
+    pub after_failure: Option<String>,
+    #[serde(default)]
+    pub after_event: Option<String>,
+    #[serde(default)]
+    pub absent_days: Option<u32>,
+    #[serde(default)]
+    pub unused_route: Option<String>,
+    #[serde(default)]
+    pub not_installed: Option<Vec<String>>,
+    #[serde(default)]
+    pub shown_before: Option<Vec<String>>,
+    /// help | ask | news; none — outside the journey. The journey's limits and control group hold for `ask`.
+    #[serde(default)]
+    pub class: Option<String>,
 }
+
+fn keep() -> String {
+    "keep".to_string()
+}
+
+/// How long a client remembers a notice that left the feed, seconds: a notice paused and back keeps its shows, clicks
+/// and closings.
+pub const GONE_KEEPS: i64 = 90 * 24 * 3600;
 
 /// What a client remembers about one notice. Unix seconds.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -81,6 +243,9 @@ pub struct NoticeMemory {
     pub shown_session: Option<u32>,
     pub clicked_at: Option<i64>,
     pub dismissed_at: Option<i64>,
+    /// When the notice was first missing from the feed; None while it is in the feed.
+    #[serde(default)]
+    pub gone_at: Option<i64>,
 }
 
 /// Whether the rules let the notice show in this launch; delay and views apply when the window draws it.
@@ -101,6 +266,9 @@ pub fn eligible(rules: &Rules, seen: &NoticeMemory, sessions: u32, first_seen: i
     }
     if seen.shown_session == Some(sessions) {
         return true;
+    }
+    if rules.after_click == "never" && seen.clicked_at.is_some() {
+        return false;
     }
     if rules.max_shows.is_some_and(|max| seen.shows >= max) {
         return false;
@@ -264,6 +432,138 @@ mod tests {
             base[k] = v.clone();
         }
         serde_json::from_value(base).unwrap()
+    }
+
+    fn rules_with(extra: serde_json::Value) -> Rules {
+        let mut base = serde_json::json!({"delay_s": 0, "after_sessions": 1, "views": null, "frequency": "session", "interval_h": 24,
+            "max_shows": null, "after_dismiss": "never", "snooze_h": 72, "audience": "all", "new_days": 7});
+        for (k, v) in extra.as_object().unwrap() {
+            base[k] = v.clone();
+        }
+        serde_json::from_value(base).unwrap()
+    }
+
+    /// A rule set of an older hub (no after_click, no journey) reads as before; never keeps a clicked notice away in
+    /// later launches and on screen in the launch that showed it.
+    #[test]
+    fn a_clicked_notice_with_after_click_never_does_not_come_back() {
+        let now = 2_000_000_000;
+        let old = rules_with(serde_json::json!({}));
+        assert_eq!((old.after_click.as_str(), old.class.clone(), old.min_done), ("keep", None, None));
+        let clicked = NoticeMemory { shows: 1, last_shown: Some(now - 10), shown_session: Some(2), clicked_at: Some(now - 5), ..Default::default() };
+        assert!(eligible(&old, &clicked, 3, 0, now), "keep: back in the next launch");
+        let never = rules_with(serde_json::json!({"after_click": "never"}));
+        assert!(!eligible(&never, &clicked, 3, 0, now), "never: not in the next launch");
+        assert!(eligible(&never, &clicked, 2, 0, now), "never: stays in the launch that showed it");
+    }
+
+    #[test]
+    fn a_step_needs_every_condition_it_names() {
+        let now = 2_000_000_000;
+        let day = 24 * 3600;
+        let seen = BTreeMap::new();
+        let facts = Facts { done: 3, session_done: 1, active_days: 2, previous_launch: Some(now - 10 * day), ..Default::default() };
+        let ok = |extra: serde_json::Value, facts: &Facts| step_ok(&rules_with(extra), facts, &seen, now - 20 * day, now);
+        assert!(ok(serde_json::json!({}), &facts), "no condition");
+        assert!(ok(serde_json::json!({"min_done": 3, "max_done": 5, "min_active_days": 2, "min_age_days": 14}), &facts));
+        assert!(!ok(serde_json::json!({"min_done": 4}), &facts));
+        assert!(!ok(serde_json::json!({"max_done": 0}), &facts), "help ends after the first work");
+        assert!(!ok(serde_json::json!({"min_age_days": 30}), &facts));
+        assert!(ok(serde_json::json!({"after_success": true}), &facts));
+        let failed = Facts { last_failure: Some(("render".into(), "TTS: out of memory".into())), ..facts.clone() };
+        assert!(!ok(serde_json::json!({"after_success": true}), &failed));
+        assert!(ok(serde_json::json!({"after_failure": "render"}), &failed));
+        assert!(ok(serde_json::json!({"after_failure": "render:TTS"}), &failed));
+        assert!(!ok(serde_json::json!({"after_failure": "render:setup"}), &failed));
+        assert!(!ok(serde_json::json!({"after_failure": "render"}), &facts), "no failure in this launch");
+        assert!(!ok(serde_json::json!({"after_event": "setup_ready"}), &facts), "no such counter yet");
+        let counted = Facts { counts: [("setup_ready".to_string(), 1)].into(), ..facts.clone() };
+        assert!(ok(serde_json::json!({"after_event": "setup_ready"}), &counted));
+        assert!(ok(serde_json::json!({"absent_days": 7}), &facts));
+        assert!(!ok(serde_json::json!({"absent_days": 14}), &facts));
+        assert!(!ok(serde_json::json!({"absent_days": 1}), &Facts { previous_launch: None, ..facts.clone() }), "first launch");
+        let routed = Facts { routes: ["POST /api/karaoke".to_string()].into(), installed: vec!["speech".into()], ..facts.clone() };
+        assert!(!ok(serde_json::json!({"unused_route": "POST /api/karaoke"}), &routed));
+        assert!(ok(serde_json::json!({"unused_route": "POST /api/stems"}), &routed));
+        assert!(!ok(serde_json::json!({"not_installed": ["speech", "dub"]}), &routed));
+        assert!(ok(serde_json::json!({"not_installed": ["dub"]}), &routed));
+        let shown: BTreeMap<String, NoticeMemory> = [("star-yue2".to_string(), NoticeMemory { shows: 1, ..Default::default() })].into();
+        assert!(step_ok(&rules_with(serde_json::json!({"shown_before": ["star-yue2"]})), &facts, &shown, 0, now));
+        assert!(!step_ok(&rules_with(serde_json::json!({"shown_before": ["star-yue2", "promo"]})), &facts, &shown, 0, now));
+    }
+
+    #[test]
+    fn a_request_waits_its_gap_and_goes_quiet_after_two_closings() {
+        let now = 2_000_000_000;
+        let h = 3600;
+        let journey = Journey::default();
+        let seed = (0..).map(|i| format!("seed-{i}")).find(|s| !in_holdout(&journey, s)).unwrap();
+        let held = (0..).map(|i| format!("seed-{i}")).find(|s| in_holdout(&journey, s)).unwrap();
+        let facts = Facts::default();
+        let none = AskMemory::default();
+        assert!(ask_ok(&journey, &seed, &facts, &none, false, 5, now));
+        assert!(!ask_ok(&journey, &held, &facts, &none, true, 5, now), "the control group never sees a request");
+        assert!(!ask_ok(&journey, &seed, &Facts { running: true, ..Facts::default() }, &none, false, 5, now));
+        assert!(!ask_ok(&journey, &seed, &Facts { last_failure: Some(("render".into(), "x".into())), ..Facts::default() }, &none, false, 5, now));
+        let recent = AskMemory { last_ask: Some(now - 10 * h), last_ask_session: Some(1), ..none.clone() };
+        assert!(!ask_ok(&journey, &seed, &facts, &recent, false, 5, now), "72 h between requests");
+        assert!(ask_ok(&journey, &seed, &facts, &recent, true, 5, now), "the one shown in this launch stays");
+        let one_launch = AskMemory { last_ask: Some(now - 80 * h), last_ask_session: Some(4), ..none.clone() };
+        assert!(!ask_ok(&journey, &seed, &facts, &one_launch, false, 5, now), "two launches between requests");
+        let quiet = AskMemory { last_ask: Some(now - 80 * h), last_ask_session: Some(1), ask_dismissals: 2, last_ask_dismissed: Some(now - 5 * 24 * h) };
+        assert!(!ask_ok(&journey, &seed, &facts, &quiet, false, 5, now), "30 quiet days after two closings");
+        assert!(ask_ok(&journey, &seed, &facts, &AskMemory { last_ask_dismissed: Some(now - 31 * 24 * h), ..quiet }, false, 5, now));
+    }
+
+    /// The hub's own values (studio-hub/test/rules.test.ts): the client and the hub answer the same.
+    #[test]
+    fn the_journey_answers_as_the_hub_does() {
+        let h = 3600;
+        let day = 24 * h;
+        let now = 1000 * h;
+        assert_eq!(bucket("0f7d1c3e-4b8a-4f2e-9d6c-1a2b3c4d5e6f", "journey"), 3051);
+        assert_eq!(bucket("install-1", "journey"), 364);
+        assert_eq!(bucket("install-2", "journey"), 1479);
+        let journey = Journey::default();
+        assert!(in_holdout(&journey, "install-1"));
+        assert!(!in_holdout(&journey, "install-2"));
+        assert!(!in_holdout(&Journey { holdout_pct: 0, ..Journey::default() }, "install-1"));
+
+        let first_seen = now - 30 * day;
+        let none = BTreeMap::new();
+        let ok = |extra: serde_json::Value, facts: &Facts| step_ok(&rules_with(extra), facts, &none, first_seen, now);
+        let f = Facts::default();
+        assert!(!ok(serde_json::json!({"min_done": 1}), &f));
+        assert!(ok(serde_json::json!({"min_done": 1}), &Facts { done: 1, ..f.clone() }));
+        assert!(!ok(serde_json::json!({"max_done": 0}), &Facts { done: 1, ..f.clone() }));
+        assert!(!ok(serde_json::json!({"min_active_days": 3}), &Facts { active_days: 2, ..f.clone() }));
+        assert!(ok(serde_json::json!({"min_active_days": 3}), &Facts { active_days: 3, ..f.clone() }));
+        assert!(!ok(serde_json::json!({"min_age_days": 31}), &f));
+        assert!(ok(serde_json::json!({"min_age_days": 30}), &f));
+        assert!(!ok(serde_json::json!({"after_success": true}), &Facts { done: 5, ..f.clone() }));
+        assert!(ok(serde_json::json!({"after_success": true}), &Facts { done: 5, session_done: 1, ..f.clone() }));
+        let oom = Facts { last_failure: Some(("song".into(), "CUDA error: out of memory".into())), ..f.clone() };
+        assert!(!ok(serde_json::json!({"after_success": true}), &Facts { session_done: 1, ..oom.clone() }));
+        assert!(ok(serde_json::json!({"after_failure": "song"}), &oom));
+        assert!(ok(serde_json::json!({"after_failure": "song:CUDA error"}), &oom));
+        assert!(!ok(serde_json::json!({"after_failure": "song:Vulkan"}), &oom));
+        assert!(!ok(serde_json::json!({"after_failure": "cover"}), &oom));
+        assert!(!ok(serde_json::json!({"after_failure": "song"}), &f));
+        assert!(!ok(serde_json::json!({"absent_days": 14}), &f));
+        assert!(!ok(serde_json::json!({"absent_days": 14}), &Facts { previous_launch: Some(now - 13 * day), ..f.clone() }));
+        assert!(ok(serde_json::json!({"absent_days": 14}), &Facts { previous_launch: Some(now - 14 * day), ..f.clone() }));
+
+        let seed = "install-2";
+        let ask = |asks: AskMemory, facts: &Facts, shown_now: bool| ask_ok(&journey, seed, facts, &asks, shown_now, 3, now);
+        let a = AskMemory::default();
+        assert!(!ask(AskMemory { last_ask: Some(now - 71 * h), ..a.clone() }, &f, false));
+        assert!(!ask(AskMemory { last_ask: Some(now - 72 * h), last_ask_session: Some(2), ..a.clone() }, &f, false));
+        assert!(ask(AskMemory { last_ask: Some(now - 72 * h), last_ask_session: Some(1), ..a.clone() }, &f, false));
+        assert!(!ask(AskMemory { ask_dismissals: 2, last_ask_dismissed: Some(now - 29 * day), ..a.clone() }, &f, false));
+        assert!(ask(AskMemory { ask_dismissals: 2, last_ask_dismissed: Some(now - 30 * day), ..a.clone() }, &f, false));
+        assert!(ask(AskMemory { ask_dismissals: 1, last_ask_dismissed: Some(now - day), ..a.clone() }, &f, false));
+        assert!(ask(a.clone(), &Facts { running: true, ..f.clone() }, true));
+        assert!(!ask_ok(&journey, "install-1", &f, &a, true, 3, now));
     }
 
     fn who() -> Audience<'static> {
