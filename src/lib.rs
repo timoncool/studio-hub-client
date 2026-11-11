@@ -551,7 +551,7 @@ impl Hub {
                         NoticeEvent::Shown => c.shown += 1,
                         NoticeEvent::Clicked => {
                             c.clicked += 1;
-                            let named = button.filter(|button| *button == "link" || (button.len() <= 3 && button.len() > 1 && (button.starts_with('b') || button.starts_with('l')) && button[1..].chars().all(|c| c.is_ascii_digit())));
+                            let named = button.filter(|button| click_name(button));
                             if let Some(button) = named.filter(|button| c.buttons.len() < MAX_BUTTONS || c.buttons.contains_key(*button)) {
                                 *c.buttons.entry(button.to_string()).or_default() += 1;
                             }
@@ -653,17 +653,8 @@ impl Hub {
                     self.change(|s| {
                         match fresh {
                             Some((tag, feed)) => {
-                                // what the user did with a notice is kept while it is out of the feed (a pause), and
-                                // forgotten only after GONE_KEEPS out of it
-                                let now = now_secs();
-                                for (id, seen) in s.seen.iter_mut() {
-                                    if feed.items.iter().chain(&feed.variants).any(|item| item.id == *id) {
-                                        seen.gone_at = None;
-                                    } else {
-                                        seen.gone_at.get_or_insert(now);
-                                    }
-                                }
-                                s.seen.retain(|_, seen| seen.gone_at.is_none_or(|gone| now - gone < feed::GONE_KEEPS));
+                                // what the user did with a notice is kept for good, also while it is out of the feed:
+                                // a notice paused and brought back, however much later, is not shown as new
                                 s.feed = Some(CachedFeed { etag: tag, feed, source: url.clone(), fetched_at: now_secs() });
                             }
                             None => {
@@ -838,6 +829,17 @@ fn route_key(method: &str, route: &str) -> Option<String> {
         && !route.contains('*')
         && route.chars().all(|c| c.is_ascii_alphanumeric() || "_./{}:-".contains(c));
     fits.then(|| format!("{method} {route}"))
+}
+
+/// What was clicked in a notice, as the hub takes it: `b<0-99>` its buttons in order, `u` and eight hex digits a link
+/// of its text by the FNV-1a hash of its address (the window computes it, so the name holds when links move), and the
+/// older `l<0-99>` and `link`.
+fn click_name(name: &str) -> bool {
+    let digits = |rest: &str| (1..=2).contains(&rest.len()) && rest.chars().all(|c| c.is_ascii_digit());
+    name == "link"
+        || name.strip_prefix('b').is_some_and(digits)
+        || name.strip_prefix('l').is_some_and(digits)
+        || name.strip_prefix('u').is_some_and(|hex| hex.len() == 8 && hex.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)))
 }
 
 /// A counter or failure kind as the hub takes it: `[a-z][a-z0-9_]{0,31}`.

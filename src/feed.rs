@@ -33,7 +33,7 @@ pub struct Journey {
 
 impl Default for Journey {
     fn default() -> Self {
-        Journey { ask_gap_h: 72, ask_gap_sessions: 2, quiet_after: 2, quiet_days: 30, holdout_pct: 10 }
+        Journey { ask_gap_h: 720, ask_gap_sessions: 2, quiet_after: 2, quiet_days: 3650, holdout_pct: 10 }
     }
 }
 
@@ -230,10 +230,6 @@ fn keep() -> String {
     "keep".to_string()
 }
 
-/// How long a client remembers a notice that left the feed, seconds: a notice paused and back keeps its shows, clicks
-/// and closings.
-pub const GONE_KEEPS: i64 = 90 * 24 * 3600;
-
 /// What a client remembers about one notice. Unix seconds.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct NoticeMemory {
@@ -243,9 +239,6 @@ pub struct NoticeMemory {
     pub shown_session: Option<u32>,
     pub clicked_at: Option<i64>,
     pub dismissed_at: Option<i64>,
-    /// When the notice was first missing from the feed; None while it is in the feed.
-    #[serde(default)]
-    pub gone_at: Option<i64>,
 }
 
 /// Whether the rules let the notice show in this launch; delay and views apply when the window draws it.
@@ -496,7 +489,7 @@ mod tests {
     fn a_request_waits_its_gap_and_goes_quiet_after_two_closings() {
         let now = 2_000_000_000;
         let h = 3600;
-        let journey = Journey::default();
+        let journey = Journey { ask_gap_h: 72, quiet_days: 30, ..Journey::default() };
         let seed = (0..).map(|i| format!("seed-{i}")).find(|s| !in_holdout(&journey, s)).unwrap();
         let held = (0..).map(|i| format!("seed-{i}")).find(|s| in_holdout(&journey, s)).unwrap();
         let facts = Facts::default();
@@ -524,7 +517,7 @@ mod tests {
         assert_eq!(bucket("0f7d1c3e-4b8a-4f2e-9d6c-1a2b3c4d5e6f", "journey"), 3051);
         assert_eq!(bucket("install-1", "journey"), 364);
         assert_eq!(bucket("install-2", "journey"), 1479);
-        let journey = Journey::default();
+        let journey = Journey { ask_gap_h: 72, quiet_days: 30, ..Journey::default() };
         assert!(in_holdout(&journey, "install-1"));
         assert!(!in_holdout(&journey, "install-2"));
         assert!(!in_holdout(&Journey { holdout_pct: 0, ..Journey::default() }, "install-1"));

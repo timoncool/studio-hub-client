@@ -261,17 +261,21 @@ async fn a_click_says_which_button_or_link() {
     hub.notice_on("star", NoticeEvent::Clicked, Some("l1"));
     let star = hub.report_for(&today()).unwrap().notices.get("star").cloned().unwrap();
     assert_eq!((star.buttons.get("l0"), star.buttons.get("l1")), (Some(&1), Some(&2)), "the links of a text apart");
+    hub.notice_on("star", NoticeEvent::Clicked, Some("udad9bf80"));
+    hub.notice_on("star", NoticeEvent::Clicked, Some("uDAD9BF80"));
+    hub.notice_on("star", NoticeEvent::Clicked, Some("u12"));
+    let star = hub.report_for(&today()).unwrap().notices.get("star").cloned().unwrap();
+    assert_eq!(star.buttons.get("udad9bf80"), Some(&1), "a link by the hash of its address");
+    assert!(!star.buttons.contains_key("uDAD9BF80") && !star.buttons.contains_key("u12"), "only the hub's form is counted");
 }
 
-/// A notice that leaves the feed (paused) and comes back keeps what the person did with it; one gone longer than the
-/// client keeps is forgotten.
+/// A notice that leaves the feed (paused) and comes back keeps what the person did with it, however long it was away.
 #[tokio::test]
 async fn a_paused_notice_keeps_its_shows_when_it_comes_back() {
     let dir = tempfile::tempdir().unwrap();
     let hub = make_hub(dir.path(), vec![dead().await]);
     hub.change(|s| {
         s.seen.insert("high".into(), crate::feed::NoticeMemory { shows: 7, dismissed_at: Some(1), ..Default::default() });
-        s.seen.insert("old".into(), crate::feed::NoticeMemory { shows: 3, gone_at: Some(now_secs() - crate::feed::GONE_KEEPS - 1), ..Default::default() });
     });
     let mut paused = feed();
     paused["items"] = serde_json::json!([paused["items"][0].clone()]);
@@ -280,13 +284,12 @@ async fn a_paused_notice_keeps_its_shows_when_it_comes_back() {
     let url = serve(mock.clone()).await;
     let hub = make_hub(dir.path(), vec![url]);
     hub.refresh().await.unwrap();
-    assert!(hub.lock().seen["high"].gone_at.is_some(), "paused: remembered as gone");
-    assert!(!hub.lock().seen.contains_key("old"), "gone past the keep: forgotten");
+    assert_eq!(hub.lock().seen["high"].shows, 7, "paused: still remembered");
     *mock.feed_body.lock().unwrap() = None;
     hub.change(|s| s.feed.as_mut().unwrap().etag = None);
     hub.refresh().await.unwrap();
     let back = hub.lock().seen["high"].clone();
-    assert_eq!((back.shows, back.dismissed_at, back.gone_at), (7, Some(1), None), "back in the feed with its shows and closing");
+    assert_eq!((back.shows, back.dismissed_at), (7, Some(1)), "back in the feed with its shows and closing");
 }
 
 /// A request (`class: ask`) is one on screen, the journey's facts follow the work, and the control group is counted.
