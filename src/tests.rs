@@ -553,7 +553,7 @@ async fn a_problem_is_filed_without_an_account_and_its_answer_comes_back_as_a_no
     let (answer, _, eligible) = &items[0];
     assert_eq!((answer.id.as_str(), answer.kind.as_str(), *eligible), ("answer-7", "bar", true));
     let content = answer.content_for("ru").unwrap();
-    assert_eq!(content.body, "Ответ на ваше сообщение № 7: Fixed in the next version.");
+    assert_eq!(content.body, "Ответ на ваше сообщение № 7: Fixed in the next version. [Открыть](https://github.com/o/r/issues/7#issuecomment-11)");
     assert_eq!(content.buttons[0].url.as_deref(), Some("https://github.com/o/r/issues/7#issuecomment-11"));
 
     hub.acknowledge(true);
@@ -568,7 +568,7 @@ async fn a_problem_is_filed_without_an_account_and_its_answer_comes_back_as_a_no
     hub.change(|s| s.problems[0].checked_at = 0);
     hub.check_problems().await;
     let closed = hub.items().into_iter().find(|(item, _, _)| item.id == "answer-7").expect("the closing is told");
-    assert_eq!(closed.0.content_for("en").unwrap().body, "Your report #7 is closed");
+    assert_eq!(closed.0.content_for("en").unwrap().body, "Your report #7 is closed. [Open](https://github.com/o/r/issues/7)");
     assert!(hub.report_problem(a_problem()).await.unwrap().number == 7 && sent_install(&issues), "with telemetry on the install id goes along");
 
     let again = make_hub(dir.path(), vec![dead().await]);

@@ -158,15 +158,18 @@ fn answer_content(answer: &Answer) -> BTreeMap<String, Content> {
         ]
     };
     let excerpt: Option<String> = answer.excerpt.as_deref().map(|excerpt| {
-        let line = excerpt.split_whitespace().collect::<Vec<_>>().join(" ");
+        // the comment's own Markdown links would be drawn as links of the bar: its brackets go
+        let line = excerpt.replace(['[', ']'], "").split_whitespace().collect::<Vec<_>>().join(" ");
         if line.chars().count() > ANSWER_LINE { format!("{}…", line.chars().take(ANSWER_LINE).collect::<String>()) } else { line }
     });
     lines
         .into_iter()
         .map(|(lang, headline, open)| {
+            // a bar draws its text alone, so the way to the issue is a link in it; the buttons serve a popup
+            let link = format!("[{open}]({})", answer.url);
             let body = match excerpt.as_deref().filter(|excerpt| !excerpt.is_empty()) {
-                Some(excerpt) => format!("{headline}: {excerpt}"),
-                None => headline,
+                Some(excerpt) => format!("{headline}: {excerpt} {link}"),
+                None => format!("{headline}. {link}"),
             };
             let button = Button { label: open.into(), action: "url".into(), url: Some(answer.url.clone()), target: None, style: "primary".into() };
             (lang.to_string(), Content { title: String::new(), body, buttons: vec![button] })
