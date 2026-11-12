@@ -551,13 +551,6 @@ impl Hub {
     /// As [`Hub::notice`], a click naming what was clicked: `b0`, `b1`... for the buttons in order, `l0`, `l1`... for the
     /// links of the text in order, `link` for a link of an older window.
     pub fn notice_on(&self, id: &str, event: NoticeEvent, button: Option<&str>) {
-        // an answer to a reported problem is this studio's own notice: nothing of it is counted or reported
-        if let Some(number) = problems::answer_number(id) {
-            if !matches!(event, NoticeEvent::Shown) {
-                self.answers_seen(number);
-            }
-            return;
-        }
         let counting = self.telemetry_on();
         self.change(|s| {
             let at = now_secs();
@@ -620,13 +613,6 @@ impl Hub {
     /// The notices that fit this studio, by priority, each with what the user did with it and whether its rules let
     /// it show in this launch (delay and views are left to the window).
     pub fn items(&self) -> Vec<(FeedItem, NoticeMemory, bool)> {
-        let mut items = self.feed_items();
-        items.extend(self.answer_items().into_iter().map(|item| (item, NoticeMemory::default(), true)));
-        items.sort_by_key(|a| std::cmp::Reverse(a.0.priority));
-        items
-    }
-
-    fn feed_items(&self) -> Vec<(FeedItem, NoticeMemory, bool)> {
         let state = self.lock();
         let Some(cached) = &state.feed else { return Vec::new() };
         let now = Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
@@ -669,6 +655,7 @@ impl Hub {
         if holdout && !self.inner.holdout_counted.swap(true, std::sync::atomic::Ordering::SeqCst) {
             self.count("journey_holdout", 1);
         }
+        items.sort_by_key(|a| std::cmp::Reverse(a.0.priority));
         items
     }
 
@@ -827,7 +814,6 @@ impl Hub {
                 if stale {
                     let _ = feed.refresh().await;
                 }
-                feed.check_problems().await;
                 tokio::time::sleep(Duration::from_secs(600)).await;
             }
         });

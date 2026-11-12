@@ -474,42 +474,25 @@ struct IssueHub {
     filed: Arc<Mutex<Vec<serde_json::Value>>>,
     /// The status and body of the next answers to `POST /v1/issue`; none — the issue is filed.
     refusal: Arc<Mutex<Option<(u16, serde_json::Value)>>>,
-    issue: Arc<Mutex<serde_json::Value>>,
 }
 
 async fn serve_issues(hub: IssueHub) -> String {
-    let app = Router::new()
-        .route(
-            "/v1/issue",
-            post({
+    let app = Router::new().route(
+        "/v1/issue",
+        post({
+            let hub = hub.clone();
+            move |Json(body): Json<serde_json::Value>| {
                 let hub = hub.clone();
-                move |Json(body): Json<serde_json::Value>| {
-                    let hub = hub.clone();
-                    async move {
-                        if let Some((status, body)) = hub.refusal.lock().unwrap().clone() {
-                            return (StatusCode::from_u16(status).unwrap(), Json(body));
-                        }
-                        hub.filed.lock().unwrap().push(body);
-                        (StatusCode::OK, Json(serde_json::json!({"number": 7, "url": "https://github.com/o/r/issues/7", "token": "3f0e1d2c-0000-4000-8000-000000000007"})))
+                async move {
+                    if let Some((status, body)) = hub.refusal.lock().unwrap().clone() {
+                        return (StatusCode::from_u16(status).unwrap(), Json(body));
                     }
+                    hub.filed.lock().unwrap().push(body);
+                    (StatusCode::OK, Json(serde_json::json!({"number": 7, "url": "https://github.com/o/r/issues/7"})))
                 }
-            }),
-        )
-        .route(
-            "/v1/issue/{token}",
-            get({
-                let hub = hub.clone();
-                move |axum::extract::Path(token): axum::extract::Path<String>| {
-                    let hub = hub.clone();
-                    async move {
-                        if token != "3f0e1d2c-0000-4000-8000-000000000007" {
-                            return (StatusCode::NOT_FOUND, Json(serde_json::Value::Null));
-                        }
-                        (StatusCode::OK, Json(hub.issue.lock().unwrap().clone()))
-                    }
-                }
-            }),
-        );
+            }
+        }),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -528,7 +511,7 @@ fn a_problem() -> problems::ProblemReport {
 }
 
 #[tokio::test]
-async fn a_problem_is_filed_without_an_account_and_its_answer_comes_back_as_a_notice() {
+async fn a_problem_is_filed_without_an_account() {
     let dir = tempfile::tempdir().unwrap();
     let issues = IssueHub::default();
     let hub = make_hub(dir.path(), vec![dead().await, serve_issues(issues.clone()).await]);
@@ -543,40 +526,10 @@ async fn a_problem_is_filed_without_an_account_and_its_answer_comes_back_as_a_no
     assert!(sent.get("steps").is_none(), "a field left blank is not sent");
     assert!(sent.get("install").is_none() && sent.get("machine").is_none(), "no id before the telemetry choice");
     assert_eq!(hub.problem_body(&a_problem()).unwrap(), sent, "the window shows exactly what leaves");
-    assert_eq!(hub.problems().iter().map(|p| (p.number, p.closed)).collect::<Vec<_>>(), [(7, false)]);
-
-    *issues.issue.lock().unwrap() = serde_json::json!({"number": 7, "url": "https://github.com/o/r/issues/7", "state": "open", "answers": [
-        {"id": 11, "at": "2026-11-15T10:00:00Z", "by": "timoncool", "excerpt": "Fixed in the next version.", "url": "https://github.com/o/r/issues/7#issuecomment-11"}]});
-    hub.check_problems().await;
-    hub.set_ui_lang("ru");
-    let items = hub.items();
-    let (answer, _, eligible) = &items[0];
-    assert_eq!((answer.id.as_str(), answer.kind.as_str(), *eligible), ("answer-7", "bar", true));
-    let content = answer.content_for("ru").unwrap();
-    assert_eq!(content.body, "Ответ на ваше сообщение № 7: Fixed in the next version. [Открыть](https://github.com/o/r/issues/7#issuecomment-11)");
-    assert_eq!(content.buttons[0].url.as_deref(), Some("https://github.com/o/r/issues/7#issuecomment-11"));
 
     hub.acknowledge(true);
-    hub.notice_on("answer-7", NoticeEvent::Shown, None);
-    assert_eq!(hub.items().iter().filter(|(item, _, _)| item.id == "answer-7").count(), 1, "shown is not seen: the bar stays until closed");
-    hub.notice_on("answer-7", NoticeEvent::Dismissed, None);
-    assert!(hub.items().iter().all(|(item, _, _)| item.id != "answer-7"));
-    assert!(hub.report_for(&today()).is_none_or(|report| report.notices.is_empty()), "an answer's notice is not counted");
-
-    *issues.issue.lock().unwrap() = serde_json::json!({"number": 7, "url": "https://github.com/o/r/issues/7", "state": "closed", "answers": [
-        {"id": 11, "at": "2026-11-15T10:00:00Z", "by": "timoncool", "excerpt": "Fixed in the next version.", "url": "https://github.com/o/r/issues/7#issuecomment-11"}]});
-    hub.change(|s| s.problems[0].checked_at = 0);
-    hub.check_problems().await;
-    let closed = hub.items().into_iter().find(|(item, _, _)| item.id == "answer-7").expect("the closing is told");
-    assert_eq!(closed.0.content_for("en").unwrap().body, "Your report #7 is closed. [Open](https://github.com/o/r/issues/7)");
-    assert!(hub.report_problem(a_problem()).await.unwrap().number == 7 && sent_install(&issues), "with telemetry on the install id goes along");
-
-    let again = make_hub(dir.path(), vec![dead().await]);
-    assert_eq!(again.problems().len(), 1, "the report is remembered across launches, filed twice or not");
-}
-
-fn sent_install(issues: &IssueHub) -> bool {
-    issues.filed.lock().unwrap().last().is_some_and(|body| body.get("install").is_some())
+    assert_eq!(hub.report_problem(a_problem()).await.unwrap().number, 7);
+    assert!(issues.filed.lock().unwrap().last().is_some_and(|body| body.get("install").is_some()), "with telemetry on the install id goes along");
 }
 
 #[tokio::test]
@@ -597,7 +550,6 @@ async fn a_report_the_hub_refuses_says_why() {
         *issues.refusal.lock().unwrap() = Some((status, body));
         assert_eq!(hub.report_problem(a_problem()).await, Err(expected));
     }
-    assert!(hub.problems().is_empty());
 
     let nowhere = make_hub(tempfile::tempdir().unwrap().path(), vec![dead().await]);
     assert!(matches!(nowhere.report_problem(a_problem()).await, Err(problems::ReportError::Unreachable(_))));
