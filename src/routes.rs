@@ -19,7 +19,14 @@ pub fn router<S: Clone + Send + Sync + 'static>(hub: Hub) -> Router<S> {
         .route("/v1/hub/refresh", post(refresh))
         .route("/v1/hub/flush", post(flush))
         .route("/v1/hub/media/{key}", get(media))
+        .route("/v1/hub/problems", get(problems))
         .with_state(hub)
+}
+
+/// The problems reported from this studio and where each stands, asked of the hub first when one is due.
+async fn problems(State(hub): State<Hub>) -> Json<serde_json::Value> {
+    hub.check_problems().await;
+    Json(json!({ "problems": hub.problems() }))
 }
 
 #[derive(Deserialize)]

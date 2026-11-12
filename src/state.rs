@@ -48,6 +48,43 @@ pub struct SetSpeed {
     pub work_s: u64,
 }
 
+/// An answer in the issue of a reported problem, as the hub hands it over.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ProblemAnswer {
+    pub id: u64,
+    pub at: String,
+    pub by: String,
+    pub excerpt: String,
+    pub url: String,
+}
+
+/// A problem reported from this studio: the issue the hub made of it and what was answered there.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct FiledProblem {
+    /// What the hub answers about the issue by; never shown.
+    pub token: String,
+    pub number: u64,
+    pub url: String,
+    /// Unix seconds.
+    pub filed_at: i64,
+    #[serde(default)]
+    pub closed: bool,
+    #[serde(default)]
+    pub closed_at: Option<i64>,
+    /// The hub no longer knows the report.
+    #[serde(default)]
+    pub gone: bool,
+    #[serde(default)]
+    pub checked_at: i64,
+    #[serde(default)]
+    pub answers: Vec<ProblemAnswer>,
+    /// The answers the person was shown, by id.
+    #[serde(default)]
+    pub seen: Vec<u64>,
+    #[serde(default)]
+    pub closed_seen: bool,
+}
+
 /// How one route of the studio's own API was used in a day: every call, and the calls answered with an error.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct RouteUse {
@@ -119,6 +156,9 @@ pub struct State {
     pub previous_launch: Option<i64>,
     #[serde(default)]
     pub asks: crate::feed::AskMemory,
+    /// Problems reported from this studio, oldest first; kept whatever the telemetry choice.
+    #[serde(default)]
+    pub problems: Vec<FiledProblem>,
 }
 
 impl State {

@@ -57,9 +57,36 @@ pub fn reason(text: &str) -> String {
     cut
 }
 
+/// A log made safe to publish: every line cleaned as a reason is, the lines kept apart, and the tail of at most
+/// `max_chars` characters, cut at a line's start.
+pub fn lines(text: &str, max_chars: usize) -> String {
+    let cleaned: Vec<String> = text
+        .lines()
+        .map(|line| {
+            let mut out: String = line.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+            for rule in rules() {
+                out = rule.pattern.replace_all(&out, rule.with).into_owned();
+            }
+            out.trim_end().to_string()
+        })
+        .collect();
+    let mut kept: Vec<&str> = Vec::new();
+    let mut room = max_chars;
+    for line in cleaned.iter().rev() {
+        let need = line.chars().count() + 1;
+        if need > room {
+            break;
+        }
+        room -= need;
+        kept.push(line);
+    }
+    kept.reverse();
+    kept.join("\n").trim_matches('\n').to_string()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::reason;
+    use super::{lines, reason};
 
     #[test]
     fn nothing_personal_leaves() {
@@ -70,6 +97,14 @@ mod tests {
         assert_eq!(reason("GET https://example.com/a?token=1 refused, mail ivan@example.com, peer 192.168.1.20:8080"), "GET <url> refused, mail <email>, peer <ip>");
         assert_eq!(reason("job 0199e2a4-7b1c-7d3e-9f00-123456789abc failed at frame 1234567"), "job <id> failed at frame <n>");
         assert_eq!(reason(r"\\server\share\my file.wav: missing"), "<path>: missing");
+    }
+
+    #[test]
+    fn a_log_keeps_its_lines_and_its_tail_without_anything_personal() {
+        let log = "[Load] C:\\Users\\Ivan\\models\\dit.gguf\n[DiT] step 3/8\nCUDA error: out of memory";
+        assert_eq!(lines(log, 60_000), "[Load] <path>\n[DiT] step 3/8\nCUDA error: out of memory");
+        assert_eq!(lines(log, 45), "[DiT] step 3/8\nCUDA error: out of memory", "the tail, cut at a line's start");
+        assert_eq!(lines("", 100), "");
     }
 
     #[test]
