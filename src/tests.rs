@@ -439,12 +439,14 @@ async fn speed_is_kept_by_model_set_beside_the_totals() {
     hub.worked_on("song", None, 10.0, Duration::from_secs(40));
     hub.worked_on("song", Some("a set with spaces"), 5.0, Duration::from_secs(5));
     hub.worked_on("song", Some("quality"), 0.0, Duration::from_secs(5));
+    hub.worked_on("Song-2", Some("quality"), 5.0, Duration::from_secs(5));
     let report = hub.report_for(&today()).unwrap();
     assert_eq!((report.counts.get("song_media_s"), report.counts.get("song_work_s")), (Some(&105), Some(&75)), "the totals count every piece of work");
     let speed = |set: Option<&str>| report.speed.iter().find(|s| s.kind == "song" && s.set.as_deref() == set).map(|s| (s.media_s, s.work_s));
     assert_eq!(speed(Some("balanced-mxfp4")), Some((90, 30)));
     assert_eq!(speed(None), Some((10, 40)));
-    assert_eq!(report.speed.len(), 2, "a name the hub would refuse and work with no result are left out");
+    assert_eq!(report.speed.len(), 2, "a set or a kind the hub would refuse and work with no result are left out");
+    assert!(report.counts.keys().all(|name| !name.starts_with("Song")), "a kind that is no counter name counts nothing");
 
     let sent = serde_json::to_value(&report).unwrap();
     assert_eq!(sent["gpu"]["compute"], "8.9");

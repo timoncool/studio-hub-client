@@ -485,8 +485,15 @@ impl Hub {
             return;
         }
         self.worked(kind, result_seconds, work);
+        if !counter_name(&format!("{kind}_media_s")) {
+            return;
+        }
         let named = |name: &str| (1..=MAX_NAME).contains(&name.len()) && name.chars().all(|c| c.is_ascii_alphanumeric() || "._+-".contains(c));
-        if !self.telemetry_on() || !named(kind) || !set.is_none_or(named) {
+        if !set.is_none_or(named) {
+            tracing::warn!("studio hub: model set name {set:?} is not [A-Za-z0-9._+-]{{1,{MAX_NAME}}}, its speed is counted in the totals only");
+            return;
+        }
+        if !self.telemetry_on() {
             return;
         }
         let (media_s, work_s) = (result_seconds.round() as u64, work.as_secs_f64().round().max(1.0) as u64);
