@@ -91,7 +91,7 @@ fn config_for(dir: &std::path::Path) -> HubConfig {
         data_dir: dir.to_path_buf(),
         http: reqwest::Client::new(),
         os_label: "windows 11".into(),
-        gpu: Gpu { vendor: "nvidia".into(), vram_gb: Gpu::vram_bucket(24 * 1_073_741_824), backend: "cuda".into() },
+        gpu: Gpu { vendor: "nvidia".into(), vram_gb: Gpu::vram_bucket(24 * 1_073_741_824), backend: "cuda".into(), compute: Gpu::compute_capability(8, 9) },
         ui_lang: "ru".into(),
         urls: Vec::new(),
     }
@@ -427,6 +427,132 @@ async fn setup_and_speed_use_the_names_the_hub_reads() {
     assert_eq!((report.counts.get("song_media_s"), report.counts.get("song_work_s")), (Some(&145), Some(&1460)));
     assert_eq!(report.failures[0].kind, "setup");
     assert_eq!(report.failures[0].reason, "GET <url> timed out");
+}
+
+#[tokio::test]
+async fn speed_is_kept_by_model_set_beside_the_totals() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = make_hub(dir.path(), vec![dead().await]);
+    hub.acknowledge(true);
+    hub.worked_on("song", Some("balanced-mxfp4"), 60.0, Duration::from_secs(20));
+    hub.worked_on("song", Some("balanced-mxfp4"), 30.4, Duration::from_secs(10));
+    hub.worked_on("song", None, 10.0, Duration::from_secs(40));
+    hub.worked_on("song", Some("a set with spaces"), 5.0, Duration::from_secs(5));
+    hub.worked_on("song", Some("quality"), 0.0, Duration::from_secs(5));
+    hub.worked_on("Song-2", Some("quality"), 5.0, Duration::from_secs(5));
+    let report = hub.report_for(&today()).unwrap();
+    assert_eq!((report.counts.get("song_media_s"), report.counts.get("song_work_s")), (Some(&105), Some(&75)), "the totals count every piece of work");
+    let speed = |set: Option<&str>| report.speed.iter().find(|s| s.kind == "song" && s.set.as_deref() == set).map(|s| (s.media_s, s.work_s));
+    assert_eq!(speed(Some("balanced-mxfp4")), Some((90, 30)));
+    assert_eq!(speed(None), Some((10, 40)));
+    assert_eq!(report.speed.len(), 2, "a set or a kind the hub would refuse and work with no result are left out");
+    assert!(report.counts.keys().all(|name| !name.starts_with("Song")), "a kind that is no counter name counts nothing");
+
+    let sent = serde_json::to_value(&report).unwrap();
+    assert_eq!(sent["gpu"]["compute"], "8.9");
+    assert_eq!(sent["speed"][0], serde_json::json!({"kind": "song", "set": "balanced-mxfp4", "media_s": 90, "work_s": 30}));
+}
+
+#[tokio::test]
+async fn a_report_without_the_new_fields_is_what_the_hub_read_before_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = Hub::new(HubConfig { gpu: Gpu { vendor: "amd".into(), vram_gb: Gpu::vram_bucket(16 * 1_073_741_824), backend: "vulkan".into(), compute: None }, urls: vec![dead().await], ..config_for(dir.path()) }).unwrap();
+    hub.acknowledge(true);
+    hub.worked("song", 60.0, Duration::from_secs(20));
+    let sent = serde_json::to_value(hub.report_for(&today()).unwrap()).unwrap();
+    assert!(sent["gpu"].get("compute").is_none() && sent.get("speed").is_none(), "{sent}");
+    assert_eq!(Gpu::compute_capability(12, 0).as_deref(), Some("12.0"));
+    assert_eq!(Gpu::compute_capability(12, 10), None);
+
+    let before: state::Day = serde_json::from_value(serde_json::json!({"counts": {"song": 1}, "models": [], "notices": {}, "dirty": true})).unwrap();
+    assert!(before.speed.is_empty(), "a day written by the client before speed by set still loads");
+}
+
+/// A hub that files reported problems: it keeps what it was sent and answers as the test sets it.
+#[derive(Clone, Default)]
+struct IssueHub {
+    filed: Arc<Mutex<Vec<serde_json::Value>>>,
+    /// The status and body of the next answers to `POST /v1/issue`; none — the issue is filed.
+    refusal: Arc<Mutex<Option<(u16, serde_json::Value)>>>,
+}
+
+async fn serve_issues(hub: IssueHub) -> String {
+    let app = Router::new().route(
+        "/v1/issue",
+        post({
+            let hub = hub.clone();
+            move |Json(body): Json<serde_json::Value>| {
+                let hub = hub.clone();
+                async move {
+                    if let Some((status, body)) = hub.refusal.lock().unwrap().clone() {
+                        return (StatusCode::from_u16(status).unwrap(), Json(body));
+                    }
+                    hub.filed.lock().unwrap().push(body);
+                    (StatusCode::OK, Json(serde_json::json!({"number": 7, "url": "https://github.com/o/r/issues/7"})))
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://{addr}")
+}
+
+fn a_problem() -> problems::ProblemReport {
+    problems::ProblemReport {
+        kind: problems::ProblemKind::Bug,
+        what: "The song stops at Decoding with an engine error".into(),
+        steps: Some("  ".into()),
+        expected: None,
+        models: Some("quality-q8".into()),
+        log: Some("[Load] C:\\Users\\Ivan\\models\\dit.gguf\nCUDA error: out of memory".into()),
+    }
+}
+
+#[tokio::test]
+async fn a_problem_is_filed_without_an_account() {
+    let dir = tempfile::tempdir().unwrap();
+    let issues = IssueHub::default();
+    let hub = make_hub(dir.path(), vec![dead().await, serve_issues(issues.clone()).await]);
+
+    let filed = hub.report_problem(a_problem()).await.unwrap();
+    assert_eq!((filed.number, filed.url.as_str()), (7, "https://github.com/o/r/issues/7"));
+    let sent = issues.filed.lock().unwrap()[0].clone();
+    assert_eq!(sent["kind"], "bug");
+    assert_eq!(sent["app"], "yue2");
+    assert_eq!(sent["gpu"]["compute"], "8.9");
+    assert_eq!(sent["log"], "[Load] <path>\nCUDA error: out of memory", "the log leaves without the person's folders");
+    assert!(sent.get("steps").is_none(), "a field left blank is not sent");
+    assert!(sent.get("install").is_none() && sent.get("machine").is_none(), "no id before the telemetry choice");
+    assert_eq!(hub.problem_body(&a_problem()).unwrap(), sent, "the window shows exactly what leaves");
+
+    hub.acknowledge(true);
+    assert_eq!(hub.report_problem(a_problem()).await.unwrap().number, 7);
+    assert!(issues.filed.lock().unwrap().last().is_some_and(|body| body.get("install").is_some()), "with telemetry on the install id goes along");
+}
+
+#[tokio::test]
+async fn a_report_the_hub_refuses_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let issues = IssueHub::default();
+    let hub = make_hub(dir.path(), vec![serve_issues(issues.clone()).await]);
+    let short = problems::ProblemReport { what: "broken".into(), ..a_problem() };
+    assert!(matches!(hub.report_problem(short).await, Err(problems::ReportError::Field(field)) if field.starts_with("what")));
+    assert!(issues.filed.lock().unwrap().is_empty(), "a report the hub would refuse never leaves");
+
+    for (status, body, expected) in [
+        (429, serde_json::json!({"error": "rate", "retry_after_s": 1800}), problems::ReportError::Rate { retry_after_s: 1800 }),
+        (503, serde_json::json!({"error": "not_configured"}), problems::ReportError::NotConfigured),
+        (503, serde_json::json!({"error": "busy"}), problems::ReportError::Busy),
+        (400, serde_json::json!({"error": "what: too long"}), problems::ReportError::Field("what: too long".into())),
+    ] {
+        *issues.refusal.lock().unwrap() = Some((status, body));
+        assert_eq!(hub.report_problem(a_problem()).await, Err(expected));
+    }
+
+    let nowhere = make_hub(tempfile::tempdir().unwrap().path(), vec![dead().await]);
+    assert!(matches!(nowhere.report_problem(a_problem()).await, Err(problems::ReportError::Unreachable(_))));
 }
 
 #[tokio::test]

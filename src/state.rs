@@ -39,6 +39,15 @@ pub struct ModelSet {
     pub count: u64,
 }
 
+/// Seconds of result made and of work spent on one kind of work with one model set in a day.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SetSpeed {
+    pub kind: String,
+    pub set: Option<String>,
+    pub media_s: u64,
+    pub work_s: u64,
+}
+
 /// How one route of the studio's own API was used in a day: every call, and the calls answered with an error.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct RouteUse {
@@ -56,6 +65,9 @@ pub struct Day {
     /// parts either way.
     #[serde(default)]
     pub model_sets: Vec<ModelSet>,
+    /// Seconds of result and of work by kind of work and model set (`Hub::worked_on`).
+    #[serde(default)]
+    pub speed: Vec<SetSpeed>,
     /// Failures by what failed and why, the why already scrubbed: `kind` and reason joined by a tab.
     #[serde(default)]
     pub failures: BTreeMap<String, u32>,
