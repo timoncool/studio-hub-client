@@ -91,7 +91,7 @@ fn config_for(dir: &std::path::Path) -> HubConfig {
         data_dir: dir.to_path_buf(),
         http: reqwest::Client::new(),
         os_label: "windows 11".into(),
-        gpu: Gpu { vendor: "nvidia".into(), vram_gb: Gpu::vram_bucket(24 * 1_073_741_824), backend: "cuda".into() },
+        gpu: Gpu { vendor: "nvidia".into(), vram_gb: Gpu::vram_bucket(24 * 1_073_741_824), backend: "cuda".into(), compute: Gpu::compute_capability(8, 9) },
         ui_lang: "ru".into(),
         urls: Vec::new(),
     }
@@ -427,6 +427,43 @@ async fn setup_and_speed_use_the_names_the_hub_reads() {
     assert_eq!((report.counts.get("song_media_s"), report.counts.get("song_work_s")), (Some(&145), Some(&1460)));
     assert_eq!(report.failures[0].kind, "setup");
     assert_eq!(report.failures[0].reason, "GET <url> timed out");
+}
+
+#[tokio::test]
+async fn speed_is_kept_by_model_set_beside_the_totals() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = make_hub(dir.path(), vec![dead().await]);
+    hub.acknowledge(true);
+    hub.worked_on("song", Some("balanced-mxfp4"), 60.0, Duration::from_secs(20));
+    hub.worked_on("song", Some("balanced-mxfp4"), 30.4, Duration::from_secs(10));
+    hub.worked_on("song", None, 10.0, Duration::from_secs(40));
+    hub.worked_on("song", Some("a set with spaces"), 5.0, Duration::from_secs(5));
+    hub.worked_on("song", Some("quality"), 0.0, Duration::from_secs(5));
+    let report = hub.report_for(&today()).unwrap();
+    assert_eq!((report.counts.get("song_media_s"), report.counts.get("song_work_s")), (Some(&105), Some(&75)), "the totals count every piece of work");
+    let speed = |set: Option<&str>| report.speed.iter().find(|s| s.kind == "song" && s.set.as_deref() == set).map(|s| (s.media_s, s.work_s));
+    assert_eq!(speed(Some("balanced-mxfp4")), Some((90, 30)));
+    assert_eq!(speed(None), Some((10, 40)));
+    assert_eq!(report.speed.len(), 2, "a name the hub would refuse and work with no result are left out");
+
+    let sent = serde_json::to_value(&report).unwrap();
+    assert_eq!(sent["gpu"]["compute"], "8.9");
+    assert_eq!(sent["speed"][0], serde_json::json!({"kind": "song", "set": "balanced-mxfp4", "media_s": 90, "work_s": 30}));
+}
+
+#[tokio::test]
+async fn a_report_without_the_new_fields_is_what_the_hub_read_before_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = Hub::new(HubConfig { gpu: Gpu { vendor: "amd".into(), vram_gb: Gpu::vram_bucket(16 * 1_073_741_824), backend: "vulkan".into(), compute: None }, urls: vec![dead().await], ..config_for(dir.path()) }).unwrap();
+    hub.acknowledge(true);
+    hub.worked("song", 60.0, Duration::from_secs(20));
+    let sent = serde_json::to_value(hub.report_for(&today()).unwrap()).unwrap();
+    assert!(sent["gpu"].get("compute").is_none() && sent.get("speed").is_none(), "{sent}");
+    assert_eq!(Gpu::compute_capability(12, 0).as_deref(), Some("12.0"));
+    assert_eq!(Gpu::compute_capability(12, 10), None);
+
+    let before: state::Day = serde_json::from_value(serde_json::json!({"counts": {"song": 1}, "models": [], "notices": {}, "dirty": true})).unwrap();
+    assert!(before.speed.is_empty(), "a day written by the client before speed by set still loads");
 }
 
 #[tokio::test]

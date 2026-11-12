@@ -43,6 +43,7 @@ const REPORT_DAYS: i64 = 14;
 /// Bounds that keep a report's size sane on a public endpoint; real model sets stay far inside them. The hub refuses a
 /// whole report that breaks one, so every value is checked against the hub's own rules before it is kept.
 const MAX_SETS: usize = 20;
+const MAX_SPEED: usize = 40;
 const MAX_COMPONENTS: usize = 64;
 /// In UTF-16 units, as the hub measures.
 const MAX_NAME: usize = 80;
@@ -63,9 +64,18 @@ pub struct Gpu {
     pub vram_gb: String,
     /// cuda | vulkan | metal | cpu ...
     pub backend: String,
+    /// An NVIDIA card's compute capability, `"12.0"` for RTX 50 or `"8.9"` for RTX 40: a generation of cards, which
+    /// many machines share. None for another make or when the driver does not say.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compute: Option<String>,
 }
 
 impl Gpu {
+    /// The compute capability as the report carries it.
+    pub fn compute_capability(major: u32, minor: u32) -> Option<String> {
+        (major < 100 && minor < 10).then(|| format!("{major}.{minor}"))
+    }
+
     /// The largest class the card holds: a 10 GB card is "<=8", a 20 GB one "16". Drivers report a little under
     /// the label (a 12 GB card as 11.99 GiB), hence the half gigabyte of slack.
     pub fn vram_bucket(bytes: u64) -> String {
@@ -143,6 +153,9 @@ pub struct Report {
     /// The model sets used, with their parts; left out when none was recorded.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub model_sets: Vec<state::ModelSet>,
+    /// Seconds of result and of work by kind of work and model set; left out when none was recorded.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub speed: Vec<state::SetSpeed>,
     /// What failed and why, scrubbed on this computer; left out of the report when nothing failed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub failures: Vec<Failure>,
@@ -465,6 +478,31 @@ impl Hub {
         self.count(&format!("{kind}_work_s"), work.as_secs_f64().round().max(1.0) as u64);
     }
 
+    /// [`Hub::worked`] for work made with a model set (`set`: a ready-made set's name, none for one put together by
+    /// hand): the same totals, and the seconds of this set beside them, so the hub compares sets on one class of card.
+    pub fn worked_on(&self, kind: &str, set: Option<&str>, result_seconds: f64, work: Duration) {
+        if result_seconds <= 0.0 || !result_seconds.is_finite() {
+            return;
+        }
+        self.worked(kind, result_seconds, work);
+        let named = |name: &str| (1..=MAX_NAME).contains(&name.len()) && name.chars().all(|c| c.is_ascii_alphanumeric() || "._+-".contains(c));
+        if !self.telemetry_on() || !named(kind) || !set.is_none_or(named) {
+            return;
+        }
+        let (media_s, work_s) = (result_seconds.round() as u64, work.as_secs_f64().round().max(1.0) as u64);
+        self.change(|s| {
+            let day = s.days.entry(today()).or_default();
+            if let Some(known) = day.speed.iter_mut().find(|known| known.kind == kind && known.set.as_deref() == set) {
+                known.media_s += media_s;
+                known.work_s += work_s;
+                day.dirty = true;
+            } else if day.speed.len() < MAX_SPEED {
+                day.speed.push(state::SetSpeed { kind: kind.to_string(), set: set.map(str::to_string), media_s, work_s });
+                day.dirty = true;
+            }
+        });
+    }
+
     /// A call to the studio's own API, by its route template; [`Hub::track`] records every call by itself. Kept in
     /// memory and written with the next save, so a window polling every second costs no disk writes. A call does not
     /// make the day one to report: the routes go along with a day that counted something, so a launch where the
@@ -698,6 +736,7 @@ impl Hub {
             models: d.models.iter().cloned().collect(),
             notices: d.notices.clone(),
             model_sets: d.model_sets.clone(),
+            speed: d.speed.clone(),
             failures: d
                 .failures
                 .iter()
