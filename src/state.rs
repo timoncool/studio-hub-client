@@ -74,6 +74,9 @@ pub struct Day {
     /// The studio's API by route template (`POST /api/songs/{id}/stems`): which features are used, never with what.
     #[serde(default)]
     pub routes: BTreeMap<String, RouteUse>,
+    /// What the engine computed on that day, as a backend's name (`Hub::computes_on`); none when it did not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<String>,
     /// Changed since the hub last accepted this day.
     pub dirty: bool,
 }
