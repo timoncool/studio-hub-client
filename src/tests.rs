@@ -91,7 +91,7 @@ fn config_for(dir: &std::path::Path) -> HubConfig {
         data_dir: dir.to_path_buf(),
         http: reqwest::Client::new(),
         os_label: "windows 11".into(),
-        gpu: Gpu { vendor: "nvidia".into(), vram_gb: Gpu::vram_bucket(24 * 1_073_741_824), backend: "cuda".into(), compute: Gpu::compute_capability(8, 9) },
+        gpu: Gpu { vendor: "nvidia".into(), vram_gb: Gpu::vram_bucket(24 * 1_073_741_824), backend: "cuda".into(), compute: Gpu::compute_capability(8, 9), active: None },
         ui_lang: "ru".into(),
         urls: Vec::new(),
     }
@@ -454,13 +454,33 @@ async fn speed_is_kept_by_model_set_beside_the_totals() {
 }
 
 #[tokio::test]
+async fn the_report_names_what_the_engine_computes_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = make_hub(dir.path(), vec![dead().await]);
+    hub.acknowledge(true);
+    hub.worked("song", 60.0, Duration::from_secs(20));
+    let active = |hub: &Hub| serde_json::to_value(hub.report_for(&today()).unwrap()).unwrap()["gpu"].get("active").cloned();
+    assert_eq!(active(&hub), None, "an engine that has not said is not guessed");
+    hub.computes_on("CUDA0");
+    assert_eq!(active(&hub), Some(serde_json::json!("cuda")), "the backend alone, as the hub names backends");
+    hub.computes_on("CPU threads");
+    assert_eq!(active(&hub), Some(serde_json::json!("cuda")), "what is no device name changes nothing");
+    hub.computes_on(" CPU ");
+    assert_eq!(active(&hub), Some(serde_json::json!("cpu")), "the last word of the day holds");
+    assert_eq!(hub.report_for(&today()).unwrap().gpu.backend, "cuda", "what the studio chose stays beside it");
+
+    let kept = Hub::new(HubConfig { urls: vec![dead().await], ..config_for(dir.path()) }).unwrap();
+    assert_eq!(active(&kept), Some(serde_json::json!("cpu")), "the day keeps it over a restart");
+}
+
+#[tokio::test]
 async fn a_report_without_the_new_fields_is_what_the_hub_read_before_them() {
     let dir = tempfile::tempdir().unwrap();
-    let hub = Hub::new(HubConfig { gpu: Gpu { vendor: "amd".into(), vram_gb: Gpu::vram_bucket(16 * 1_073_741_824), backend: "vulkan".into(), compute: None }, urls: vec![dead().await], ..config_for(dir.path()) }).unwrap();
+    let hub = Hub::new(HubConfig { gpu: Gpu { vendor: "amd".into(), vram_gb: Gpu::vram_bucket(16 * 1_073_741_824), backend: "vulkan".into(), compute: None, active: None }, urls: vec![dead().await], ..config_for(dir.path()) }).unwrap();
     hub.acknowledge(true);
     hub.worked("song", 60.0, Duration::from_secs(20));
     let sent = serde_json::to_value(hub.report_for(&today()).unwrap()).unwrap();
-    assert!(sent["gpu"].get("compute").is_none() && sent.get("speed").is_none(), "{sent}");
+    assert!(sent["gpu"].get("compute").is_none() && sent["gpu"].get("active").is_none() && sent.get("speed").is_none(), "{sent}");
     assert_eq!(Gpu::compute_capability(12, 0).as_deref(), Some("12.0"));
     assert_eq!(Gpu::compute_capability(12, 10), None);
 

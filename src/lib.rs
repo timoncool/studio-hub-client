@@ -69,6 +69,10 @@ pub struct Gpu {
     /// many machines share. None for another make or when the driver does not say.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compute: Option<String>,
+    /// What the engine said it computes on ([`Hub::computes_on`]); `backend` is what the studio chose. The report
+    /// fills it from the day, a studio leaves it None.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active: Option<String>,
 }
 
 impl Gpu {
@@ -469,6 +473,27 @@ impl Hub {
         self.failed("setup", reason);
     }
 
+    /// What the engine computes on, as its own log names it ("CUDA0", "Vulkan0", "CPU"): kept for the day as the
+    /// backend alone ("cuda", "vulkan", "cpu"), so the hub tells a card that computes from one whose backend did
+    /// not load and gives the day's speed to what made it. The last word of a day holds.
+    pub fn computes_on(&self, device: &str) {
+        let backend: String = device.trim().trim_end_matches(|c: char| c.is_ascii_digit()).to_ascii_lowercase();
+        if !(1..=16).contains(&backend.len()) || !backend.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
+            tracing::warn!("studio hub: {device:?} is not a device name, the report goes without it");
+            return;
+        }
+        if !self.telemetry_on() {
+            return;
+        }
+        self.change(|s| {
+            let day = s.days.entry(today()).or_default();
+            if day.active.as_deref() != Some(backend.as_str()) {
+                day.active = Some(backend.clone());
+                day.dirty = true;
+            }
+        });
+    }
+
     /// Seconds of result (`kind` song, analyze...) made in `work`, for the hub's speed by card class. Only work that
     /// had the engine to itself measures the card: time spent waiting behind another job would read as a slow card.
     pub fn worked(&self, kind: &str, result_seconds: f64, work: Duration) {
@@ -739,7 +764,7 @@ impl Hub {
             day: day.to_string(),
             os: self.inner.config.os_label.chars().filter(|c| c.is_ascii_alphanumeric() || " ._+-".contains(*c)).take(40).collect(),
             ui_lang: self.ui_lang(),
-            gpu: self.inner.config.gpu.clone(),
+            gpu: Gpu { active: d.active.clone(), ..self.inner.config.gpu.clone() },
             counts: d.counts.clone(),
             models: d.models.iter().cloned().collect(),
             notices: d.notices.clone(),
