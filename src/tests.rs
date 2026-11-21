@@ -615,3 +615,26 @@ async fn a_neighbours_model_is_taken_through_a_staged_name_and_left_alone_when_t
     std::fs::write(&source, vec![2u8; 4096]).unwrap();
     assert_eq!(std::fs::read(&target).unwrap()[0], 2, "a hard link: one file on disk");
 }
+
+#[tokio::test]
+async fn scheduled_usage_accumulates_without_waking_the_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = make_hub(dir.path(), vec![dead().await]);
+    hub.acknowledge(true);
+    let wait = || tokio::time::timeout(Duration::from_millis(30), hub.inner.report_soon.notified());
+    hub.count("baseline", 1);
+    wait().await.expect("ordinary counts request a report");
+
+    let deferred = hub.for_scheduled_report();
+    deferred.count("songs", 1);
+    deferred.used_models(Some("heartmula"), &["cuda".into()], 1);
+    deferred.worked_on("song", Some("heartmula"), 30.0, Duration::from_secs(3));
+    deferred.failed("song", "timeout");
+    assert!(wait().await.is_err());
+    let report = hub.report_for(&today()).unwrap();
+    assert_eq!(report.counts.get("songs"), Some(&1));
+    assert_eq!(report.model_sets[0].count, 1);
+    assert_eq!(report.speed[0].media_s, 30);
+    hub.count("baseline", 1);
+    wait().await.expect("other handles still wake the worker");
+}

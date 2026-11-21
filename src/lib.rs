@@ -117,6 +117,7 @@ pub struct HubConfig {
 #[derive(Clone)]
 pub struct Hub {
     inner: Arc<Inner>,
+    request_early_reports: bool,
 }
 
 struct Inner {
@@ -234,6 +235,7 @@ impl Hub {
         state.bucket_seed.get_or_insert_with(|| uuid::Uuid::new_v4().to_string());
         let ui_lang = Mutex::new(config.ui_lang.clone());
         let hub = Hub {
+            request_early_reports: true,
             inner: Arc::new(Inner {
                 config,
                 urls,
@@ -254,6 +256,18 @@ impl Hub {
         hub.persist(&hub.lock());
         hub.count_launch();
         Ok(hub)
+    }
+
+    /// Shares counters and consent with this handle. Work recorded through the returned
+    /// handle is included in the next report without waking the reporting worker early.
+    pub fn for_scheduled_report(&self) -> Self {
+        Self { inner: Arc::clone(&self.inner), request_early_reports: false }
+    }
+
+    fn request_report(&self) {
+        if self.request_early_reports {
+            self.inner.report_soon.notify_one();
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -390,7 +404,7 @@ impl Hub {
             *day.counts.entry(name.to_string()).or_default() += n;
             day.dirty = true;
         });
-        self.inner.report_soon.notify_one();
+        self.request_report();
     }
 
     /// The models used today (short names of letters, digits, spaces and `._+-`, at most 40, 20 a day).
@@ -435,7 +449,7 @@ impl Hub {
                 day.dirty = true;
             }
         });
-        self.inner.report_soon.notify_one();
+        self.request_report();
     }
 
     /// Something failed (`kind`: song, analyze, render, ...): counted with its reason, which is scrubbed here, before it
@@ -458,7 +472,7 @@ impl Hub {
                 day.dirty = true;
             }
         });
-        self.inner.report_soon.notify_one();
+        self.request_report();
     }
 
     /// The models got ready (a download finished): the step between installing and the first result in the hub's
